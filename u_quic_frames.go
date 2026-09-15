@@ -30,7 +30,6 @@ import (
 	"errors"
 	"fmt"
 	"math/big"
-	mrand "math/rand"
 
 	"github.com/Berserk-Automation-Hub/quic-go-utls/quicvarint"
 )
@@ -224,7 +223,25 @@ func (q *QUICRandomFrames) Build(chunks []CryptoChunk, budget int) ([]byte, erro
 	}
 
 	// (5) Shuffle and concatenate. CRYPTO frames carry absolute offsets, so any order is valid.
-	mrand.Shuffle(len(frames), func(i, j int) { frames[i], frames[j] = frames[j], frames[i] })
+	//
+	// crypto/rand, NOT math/rand. The frame ORDER is a fingerprint-bearing value exactly like the
+	// frame LENGTHS chosen above, and those already come from randUint64 -> crypto/rand. Drawing the
+	// two from different sources inside one function was an inconsistency with no reason behind it.
+	//
+	// It also removed a real failure mode: math/rand's top-level functions are process-global, so any
+	// code anywhere in the binary calling the (deprecated but still legal) mrand.Seed would make this
+	// permutation deterministic and identical for every connection in the process — a far stronger
+	// tell than the layout it is meant to randomise, and one nothing here could detect.
+	//
+	// Fisher-Yates, drawing each index from the same helper as the lengths so a broken RNG loud-fails
+	// here too rather than silently degrading to a fixed order.
+	for i := len(frames) - 1; i > 0; i-- {
+		j, err := randUint64(0, uint64(i))
+		if err != nil {
+			return nil, err
+		}
+		frames[i], frames[j] = frames[j], frames[i]
+	}
 	out := make([]byte, 0, budget)
 	for _, f := range frames {
 		out = append(out, f...)

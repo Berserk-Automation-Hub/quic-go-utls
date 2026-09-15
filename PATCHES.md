@@ -195,3 +195,23 @@ quic-go-vs-utls mismatch, not a consequence of anything here, and it is not on a
 uses. Closing it would mean adding a field to utls's public `ConnectionState`, which is a change to a
 TLS library's API surface for the benefit of one integration test — deliberately not done, and
 recorded rather than hidden.
+
+---
+
+## Patch: the Initial frame ORDER is drawn from crypto/rand, like its lengths
+
+`QUICRandomFrames` builds the Initial payload by choosing frame LENGTHS and then shuffling the frame
+ORDER. The lengths already came from `randUint64` → `crypto/rand`, with a loud failure on a broken
+RNG. The shuffle used `math/rand`.
+
+Both are fingerprint-bearing — the order is precisely the "chaos protected" layout this file exists
+to reproduce — so drawing them from different sources inside one function was an inconsistency with
+no reason behind it.
+
+It also closed a real failure mode. `math/rand`'s top-level functions are process-global, so any code
+anywhere in the binary calling the deprecated-but-still-legal `mrand.Seed` would make this
+permutation deterministic and identical for every connection in the process: a far stronger tell than
+the layout it is meant to randomise, and one nothing here could have detected.
+
+Now a Fisher-Yates drawing each index from the same helper as the lengths, so a broken RNG loud-fails
+rather than silently degrading to a fixed order. `mrand` is no longer imported by the u-layer at all.
