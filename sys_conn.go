@@ -53,7 +53,13 @@ type OOBCapablePacketConn interface {
 var _ OOBCapablePacketConn = &net.UDPConn{}
 
 func wrapConn(pc net.PacketConn) (rawConn, error) {
-	if err := setReceiveBuffer(pc); err != nil {
+	return wrapConnWithBuffers(pc, 0, 0)
+}
+
+// wrapConnWithBuffers is wrapConn with EXPLICIT socket buffer targets (0 = package defaults).
+// U-LAYER: see the note on Transport.init.
+func wrapConnWithBuffers(pc net.PacketConn, wantReceive, wantSend int) (rawConn, error) {
+	if err := setReceiveBufferTo(pc, wantReceive); err != nil {
 		if !strings.Contains(err.Error(), "use of closed network connection") {
 			setBufferWarningOnce.Do(func() {
 				if disable, _ := strconv.ParseBool(os.Getenv("QUIC_GO_DISABLE_RECEIVE_BUFFER_WARNING")); disable {
@@ -63,7 +69,7 @@ func wrapConn(pc net.PacketConn) (rawConn, error) {
 			})
 		}
 	}
-	if err := setSendBuffer(pc); err != nil {
+	if err := setSendBufferTo(pc, wantSend); err != nil {
 		if !strings.Contains(err.Error(), "use of closed network connection") {
 			setBufferWarningOnce.Do(func() {
 				if disable, _ := strconv.ParseBool(os.Getenv("QUIC_GO_DISABLE_RECEIVE_BUFFER_WARNING")); disable {

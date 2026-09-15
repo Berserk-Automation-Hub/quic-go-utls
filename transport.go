@@ -55,6 +55,11 @@ type closePacket struct {
 // A Transport handles a single net.PacketConn, and offers a range of configuration options
 // compared to the simple helper functions like [Listen] and [Dial] that this package provides.
 type Transport struct {
+	// U-LAYER (additive): this Transport's own UDP socket buffer targets. 0 = package defaults.
+	// See the note on Transport.init.
+	UDesiredReceiveBufferSize int
+	UDesiredSendBufferSize    int
+
 	// A single net.PacketConn can only be handled by one Transport.
 	// Bad things will happen if passed to multiple Transports.
 	//
@@ -376,6 +381,16 @@ func (t *Transport) doDial(
 	}
 }
 
+// U-LAYER (browser parroting): UDesiredReceiveBufferSize / UDesiredSendBufferSize are this
+// Transport's OWN SO_RCVBUF / SO_SNDBUF targets. Zero means "use the package-level defaults"
+// (protocol.DesiredReceiveBufferSize / DesiredSendBufferSize), which is upstream behaviour.
+//
+// WHY PER-TRANSPORT AND NOT GLOBAL. The socket buffer pair is one of the only two UDP socket options
+// an application chooses, so it is part of the identity a profile declares
+// (http3.engine.socket_receive_buffer / .socket_send_buffer). With ONE process-wide pair, two
+// profiles dialling concurrently could each wrap the other's socket with the other's sizes — a
+// cross-identity fingerprint bleed — and the unsynchronised writes were a data race besides. Setting
+// them on the Transport that owns the socket removes both.
 func (t *Transport) init(allowZeroLengthConnIDs bool) error {
 	t.initOnce.Do(func() {
 		var conn rawConn
@@ -383,7 +398,7 @@ func (t *Transport) init(allowZeroLengthConnIDs bool) error {
 			conn = c
 		} else {
 			var err error
-			conn, err = wrapConn(t.Conn)
+			conn, err = wrapConnWithBuffers(t.Conn, t.UDesiredReceiveBufferSize, t.UDesiredSendBufferSize)
 			if err != nil {
 				t.initErr = err
 				return

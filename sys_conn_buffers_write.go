@@ -13,7 +13,13 @@ import (
 	"github.com/bogdanfinn/quic-go-utls/internal/utils"
 )
 
-func setSendBuffer(c net.PacketConn) error {
+func setSendBuffer(c net.PacketConn) error { return setSendBufferTo(c, 0) }
+
+// setSendBufferTo raises the socket send buffer to `want` (0 = the package default).
+func setSendBufferTo(c net.PacketConn, want int) error {
+	if want <= 0 {
+		want = protocol.DesiredSendBufferSize()
+	}
 	conn, ok := c.(interface{ SetWriteBuffer(int) error })
 	if !ok {
 		return errors.New("connection doesn't allow setting of send buffer size. Not a *net.UDPConn?")
@@ -34,23 +40,23 @@ func setSendBuffer(c net.PacketConn) error {
 	// net.PacketConn interface and the SetWriteBuffer method.
 	// We have no way of checking if increasing the buffer size actually worked.
 	if syscallConn == nil {
-		return conn.SetWriteBuffer(protocol.DesiredSendBufferSize)
+		return conn.SetWriteBuffer(want)
 	}
 
 	size, err := inspectWriteBuffer(syscallConn)
 	if err != nil {
 		return fmt.Errorf("failed to determine send buffer size: %w", err)
 	}
-	if size >= protocol.DesiredSendBufferSize {
-		utils.DefaultLogger.Debugf("Conn has send buffer of %d kiB (wanted: at least %d kiB)", size/1024, protocol.DesiredSendBufferSize/1024)
+	if size >= want {
+		utils.DefaultLogger.Debugf("Conn has send buffer of %d kiB (wanted: at least %d kiB)", size/1024, want/1024)
 		return nil
 	}
 	// Ignore the error. We check if we succeeded by querying the buffer size afterward.
-	_ = conn.SetWriteBuffer(protocol.DesiredSendBufferSize)
+	_ = conn.SetWriteBuffer(want)
 	newSize, err := inspectWriteBuffer(syscallConn)
-	if newSize < protocol.DesiredSendBufferSize {
+	if newSize < want {
 		// Try again with RCVBUFFORCE on Linux
-		_ = forceSetSendBuffer(syscallConn, protocol.DesiredSendBufferSize)
+		_ = forceSetSendBuffer(syscallConn, want)
 		newSize, err = inspectWriteBuffer(syscallConn)
 		if err != nil {
 			return fmt.Errorf("failed to determine send buffer size: %w", err)
@@ -60,10 +66,10 @@ func setSendBuffer(c net.PacketConn) error {
 		return fmt.Errorf("failed to determine send buffer size: %w", err)
 	}
 	if newSize == size {
-		return fmt.Errorf("failed to increase send buffer size (wanted: %d kiB, got %d kiB)", protocol.DesiredSendBufferSize/1024, newSize/1024)
+		return fmt.Errorf("failed to increase send buffer size (wanted: %d kiB, got %d kiB)", want/1024, newSize/1024)
 	}
-	if newSize < protocol.DesiredSendBufferSize {
-		return fmt.Errorf("failed to sufficiently increase send buffer size (was: %d kiB, wanted: %d kiB, got: %d kiB)", size/1024, protocol.DesiredSendBufferSize/1024, newSize/1024)
+	if newSize < want {
+		return fmt.Errorf("failed to sufficiently increase send buffer size (was: %d kiB, wanted: %d kiB, got: %d kiB)", size/1024, want/1024, newSize/1024)
 	}
 	utils.DefaultLogger.Debugf("Increased send buffer size to %d kiB", newSize/1024)
 	return nil

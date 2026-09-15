@@ -28,7 +28,11 @@ const clientSessionStateRevision = 5
 
 type cryptoSetup struct {
 	tlsConf *tls.Config
-	conn    *tls.QUICConn
+	// [SIGHTGLASS U-LAYER] widened from *tls.QUICConn to the tlsQUICConn interface (u_crypto_setup.go)
+	// so the same crypto setup can drive utls' *tls.UQUICConn, which emits a ClientHello built from a
+	// browser ClientHelloSpec. Upstream behaviour is unchanged: NewCryptoSetupClient/Server still
+	// store a *tls.QUICConn here.
+	conn tlsQUICConn
 
 	events []Event
 
