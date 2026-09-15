@@ -5,7 +5,7 @@ import (
 	"encoding/binary"
 	"errors"
 
-	"github.com/bogdanfinn/quic-go-utls/internal/protocol"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/protocol"
 )
 
 // ParseVersionNegotiationPacket parses a Version Negotiation packet.

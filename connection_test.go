@@ -12,22 +12,22 @@ import (
 	"testing"
 	"time"
 
-	tls "github.com/bogdanfinn/utls"
+	tls "github.com/Berserk-Automation-Hub/utls"
 
-	"github.com/bogdanfinn/quic-go-utls/internal/ackhandler"
-	"github.com/bogdanfinn/quic-go-utls/internal/flowcontrol"
-	"github.com/bogdanfinn/quic-go-utls/internal/handshake"
-	"github.com/bogdanfinn/quic-go-utls/internal/mocks"
-	mockackhandler "github.com/bogdanfinn/quic-go-utls/internal/mocks/ackhandler"
-	"github.com/bogdanfinn/quic-go-utls/internal/monotime"
-	"github.com/bogdanfinn/quic-go-utls/internal/protocol"
-	"github.com/bogdanfinn/quic-go-utls/internal/qerr"
-	"github.com/bogdanfinn/quic-go-utls/internal/synctest"
-	"github.com/bogdanfinn/quic-go-utls/internal/utils"
-	"github.com/bogdanfinn/quic-go-utls/internal/wire"
-	"github.com/bogdanfinn/quic-go-utls/qlog"
-	"github.com/bogdanfinn/quic-go-utls/qlogwriter"
-	"github.com/bogdanfinn/quic-go-utls/testutils/events"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/ackhandler"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/flowcontrol"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/handshake"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/mocks"
+	mockackhandler "github.com/Berserk-Automation-Hub/quic-go-utls/internal/mocks/ackhandler"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/monotime"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/protocol"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/qerr"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/synctest"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/utils"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/wire"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/qlog"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/qlogwriter"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/testutils/events"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1902,7 +1902,7 @@ func TestConnectionPacketPacing(t *testing.T) {
 }
 
 // When the send queue blocks, we need to reset the pacing timer, otherwise the run loop might busy-loop.
-// See https://github.com/bogdanfinn/quic-go-utls/pull/4943 for more details.
+// See https://github.com/Berserk-Automation-Hub/quic-go-utls/pull/4943 for more details.
 func TestConnectionPacingAndSendQueue(t *testing.T) {
 	synctest.Test(t, func(t *testing.T) {
 		mockCtrl := gomock.NewController(t)

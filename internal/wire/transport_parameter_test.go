@@ -10,9 +10,9 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bogdanfinn/quic-go-utls/internal/protocol"
-	"github.com/bogdanfinn/quic-go-utls/internal/qerr"
-	"github.com/bogdanfinn/quic-go-utls/quicvarint"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/protocol"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/qerr"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/quicvarint"
 
 	"github.com/stretchr/testify/require"
 )

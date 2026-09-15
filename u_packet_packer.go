@@ -11,9 +11,9 @@ package quic
 import (
 	"fmt"
 
-	"github.com/bogdanfinn/quic-go-utls/internal/monotime"
-	"github.com/bogdanfinn/quic-go-utls/internal/protocol"
-	"github.com/bogdanfinn/quic-go-utls/internal/wire"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/monotime"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/protocol"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/wire"
 )
 
 type uPacketPacker struct {

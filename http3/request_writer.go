@@ -10,16 +10,16 @@ import (
 	"strings"
 	"sync"
 
-	http "github.com/bogdanfinn/fhttp"
-	"github.com/bogdanfinn/fhttp/httptrace"
+	http "github.com/Berserk-Automation-Hub/fhttp"
+	"github.com/Berserk-Automation-Hub/fhttp/httptrace"
 	"github.com/quic-go/qpack"
 	"golang.org/x/net/http/httpguts"
 	"golang.org/x/net/http2/hpack"
 	"golang.org/x/net/idna"
 
-	"github.com/bogdanfinn/quic-go-utls"
-	"github.com/bogdanfinn/quic-go-utls/http3/qlog"
-	"github.com/bogdanfinn/quic-go-utls/qlogwriter"
+	"github.com/Berserk-Automation-Hub/quic-go-utls"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/http3/qlog"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/qlogwriter"
 )
 
 const bodyCopyBufferSize = 8 * 1024

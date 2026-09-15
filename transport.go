@@ -10,13 +10,13 @@ import (
 	"sync/atomic"
 	"time"
 
-	tls "github.com/bogdanfinn/utls"
+	tls "github.com/Berserk-Automation-Hub/utls"
 
-	"github.com/bogdanfinn/quic-go-utls/internal/protocol"
-	"github.com/bogdanfinn/quic-go-utls/internal/utils"
-	"github.com/bogdanfinn/quic-go-utls/internal/wire"
-	"github.com/bogdanfinn/quic-go-utls/qlog"
-	"github.com/bogdanfinn/quic-go-utls/qlogwriter"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/protocol"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/utils"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/wire"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/qlog"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/qlogwriter"
 )
 
 // ErrTransportClosed is returned by the [Transport]'s Listen or Dial method after it was closed.
@@ -383,7 +383,7 @@ func (t *Transport) doDial(
 
 // U-LAYER (browser parroting): UDesiredReceiveBufferSize / UDesiredSendBufferSize are this
 // Transport's OWN SO_RCVBUF / SO_SNDBUF targets. Zero means "use the package-level defaults"
-// (protocol.DesiredReceiveBufferSize / DesiredSendBufferSize), which is upstream behaviour.
+// (protocol.DesiredReceiveBufferSize() / DesiredSendBufferSize), which is upstream behaviour.
 //
 // WHY PER-TRANSPORT AND NOT GLOBAL. The socket buffer pair is one of the only two UDP socket options
 // an application chooses, so it is part of the identity a profile declares
@@ -553,7 +553,7 @@ func (t *Transport) listen(conn rawConn) {
 		//nolint:staticcheck // SA1019 ignore this!
 		// TODO: This code is used to ignore wsa errors on Windows.
 		// Since net.Error.Temporary is deprecated as of Go 1.18, we should find a better solution.
-		// See https://github.com/bogdanfinn/quic-go-utls/issues/1737 for details.
+		// See https://github.com/Berserk-Automation-Hub/quic-go-utls/issues/1737 for details.
 		if nerr, ok := err.(net.Error); ok && nerr.Temporary() {
 			t.mutex.Lock()
 			closed := t.closeErr != nil

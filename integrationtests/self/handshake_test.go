@@ -12,13 +12,13 @@ import (
 	"testing"
 	"time"
 
-	tls "github.com/bogdanfinn/utls"
+	tls "github.com/Berserk-Automation-Hub/utls"
 
-	"github.com/bogdanfinn/quic-go-utls"
-	quicproxy "github.com/bogdanfinn/quic-go-utls/integrationtests/tools/proxy"
-	"github.com/bogdanfinn/quic-go-utls/internal/protocol"
-	"github.com/bogdanfinn/quic-go-utls/internal/qerr"
-	"github.com/bogdanfinn/quic-go-utls/internal/qtls"
+	"github.com/Berserk-Automation-Hub/quic-go-utls"
+	quicproxy "github.com/Berserk-Automation-Hub/quic-go-utls/integrationtests/tools/proxy"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/protocol"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/qerr"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/qtls"
 
 	"github.com/stretchr/testify/require"
 )

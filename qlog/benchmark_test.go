@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bogdanfinn/quic-go-utls/internal/protocol"
-	"github.com/bogdanfinn/quic-go-utls/internal/utils"
-	"github.com/bogdanfinn/quic-go-utls/internal/wire"
-	"github.com/bogdanfinn/quic-go-utls/qlogwriter"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/protocol"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/utils"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/wire"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/qlogwriter"
 )
 
 type nopWriteCloserImpl struct{ io.Writer }

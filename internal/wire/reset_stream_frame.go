@@ -3,9 +3,9 @@ package wire
 import (
 	"fmt"
 
-	"github.com/bogdanfinn/quic-go-utls/internal/protocol"
-	"github.com/bogdanfinn/quic-go-utls/internal/qerr"
-	"github.com/bogdanfinn/quic-go-utls/quicvarint"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/protocol"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/qerr"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/quicvarint"
 )
 
 // A ResetStreamFrame is a RESET_STREAM or RESET_STREAM_AT frame in QUIC

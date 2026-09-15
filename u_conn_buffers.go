@@ -1,6 +1,6 @@
 package quic
 
-import "github.com/bogdanfinn/quic-go-utls/internal/protocol"
+import "github.com/Berserk-Automation-Hub/quic-go-utls/internal/protocol"
 
 // U-LAYER (additive): browser-pinned UDP socket buffer sizes.
 //

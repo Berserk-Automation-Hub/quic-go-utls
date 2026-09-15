@@ -11,11 +11,11 @@ import (
 	mrand "math/rand/v2"
 	"testing"
 
-	tls "github.com/bogdanfinn/utls"
+	tls "github.com/Berserk-Automation-Hub/utls"
 
 	"golang.org/x/crypto/cryptobyte"
 
-	"github.com/bogdanfinn/quic-go-utls/internal/protocol"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/protocol"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"

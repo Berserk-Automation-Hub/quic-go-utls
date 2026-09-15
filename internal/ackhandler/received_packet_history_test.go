@@ -5,7 +5,7 @@ import (
 	"slices"
 	"testing"
 
-	"github.com/bogdanfinn/quic-go-utls/internal/protocol"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/protocol"
 
 	"github.com/stretchr/testify/require"
 )

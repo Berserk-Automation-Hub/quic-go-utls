@@ -6,12 +6,12 @@ import (
 	"net"
 	"testing"
 
-	http "github.com/bogdanfinn/fhttp"
-	"github.com/bogdanfinn/fhttp/httptest"
-	tls "github.com/bogdanfinn/utls"
+	http "github.com/Berserk-Automation-Hub/fhttp"
+	"github.com/Berserk-Automation-Hub/fhttp/httptest"
+	tls "github.com/Berserk-Automation-Hub/utls"
 
-	"github.com/bogdanfinn/quic-go-utls"
-	"github.com/bogdanfinn/quic-go-utls/internal/testdata"
+	"github.com/Berserk-Automation-Hub/quic-go-utls"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/testdata"
 
 	"github.com/stretchr/testify/require"
 )

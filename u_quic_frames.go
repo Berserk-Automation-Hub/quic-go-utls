@@ -32,7 +32,7 @@ import (
 	"math/big"
 	mrand "math/rand"
 
-	"github.com/bogdanfinn/quic-go-utls/quicvarint"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/quicvarint"
 )
 
 // CryptoChunk is a contiguous run of CRYPTO-stream bytes destined for one Initial packet, at its

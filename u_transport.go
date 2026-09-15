@@ -9,11 +9,11 @@ import (
 	"errors"
 	"net"
 
-	tls "github.com/bogdanfinn/utls"
+	tls "github.com/Berserk-Automation-Hub/utls"
 
-	"github.com/bogdanfinn/quic-go-utls/internal/protocol"
-	"github.com/bogdanfinn/quic-go-utls/internal/utils"
-	"github.com/bogdanfinn/quic-go-utls/qlogwriter"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/protocol"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/utils"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/qlogwriter"
 )
 
 // UTransport is a Transport that dials with a QUICSpec.

@@ -11,12 +11,12 @@ package handshake
 import (
 	"context"
 
-	tls "github.com/bogdanfinn/utls"
+	tls "github.com/Berserk-Automation-Hub/utls"
 
-	"github.com/bogdanfinn/quic-go-utls/internal/protocol"
-	"github.com/bogdanfinn/quic-go-utls/internal/utils"
-	"github.com/bogdanfinn/quic-go-utls/internal/wire"
-	"github.com/bogdanfinn/quic-go-utls/qlogwriter"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/protocol"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/utils"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/wire"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/qlogwriter"
 )
 
 // tlsQUICConn is the subset of *tls.QUICConn that cryptoSetup uses. *tls.UQUICConn now implements

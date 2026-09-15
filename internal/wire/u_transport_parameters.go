@@ -11,9 +11,9 @@ package wire
 import (
 	"time"
 
-	tls "github.com/bogdanfinn/utls"
+	tls "github.com/Berserk-Automation-Hub/utls"
 
-	"github.com/bogdanfinn/quic-go-utls/internal/protocol"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/protocol"
 )
 
 func (p *TransportParameters) PopulateFromUQUIC(params tls.TransportParameters) {

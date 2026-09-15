@@ -10,12 +10,12 @@ import (
 	"net/textproto"
 	"time"
 
-	http "github.com/bogdanfinn/fhttp"
-	"github.com/bogdanfinn/fhttp/httptrace"
+	http "github.com/Berserk-Automation-Hub/fhttp"
+	"github.com/Berserk-Automation-Hub/fhttp/httptrace"
 
-	"github.com/bogdanfinn/quic-go-utls"
-	"github.com/bogdanfinn/quic-go-utls/http3/qlog"
-	"github.com/bogdanfinn/quic-go-utls/quicvarint"
+	"github.com/Berserk-Automation-Hub/quic-go-utls"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/http3/qlog"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/quicvarint"
 
 	"github.com/quic-go/qpack"
 )

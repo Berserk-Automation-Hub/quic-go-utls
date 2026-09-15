@@ -6,14 +6,14 @@ import (
 	"net"
 	"os"
 
-	http "github.com/bogdanfinn/fhttp"
-	tls "github.com/bogdanfinn/utls"
+	http "github.com/Berserk-Automation-Hub/fhttp"
+	tls "github.com/Berserk-Automation-Hub/utls"
 
-	"github.com/bogdanfinn/quic-go-utls"
-	"github.com/bogdanfinn/quic-go-utls/http3"
-	"github.com/bogdanfinn/quic-go-utls/internal/qtls"
-	"github.com/bogdanfinn/quic-go-utls/interop/http09"
-	"github.com/bogdanfinn/quic-go-utls/interop/utils"
+	"github.com/Berserk-Automation-Hub/quic-go-utls"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/http3"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/qtls"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/interop/http09"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/interop/utils"
 )
 
 func main() {

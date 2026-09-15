@@ -9,9 +9,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/bogdanfinn/quic-go-utls/internal/monotime"
-	"github.com/bogdanfinn/quic-go-utls/internal/protocol"
-	"github.com/bogdanfinn/quic-go-utls/internal/utils"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/monotime"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/protocol"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/utils"
 )
 
 // Connection is a UDP connection
@@ -172,10 +172,10 @@ func (p *Proxy) Start() error {
 	p.closeChan = make(chan struct{})
 	p.logger = utils.DefaultLogger.WithPrefix("proxy")
 
-	if err := p.Conn.SetReadBuffer(protocol.DesiredReceiveBufferSize); err != nil {
+	if err := p.Conn.SetReadBuffer(protocol.DesiredReceiveBufferSize()); err != nil {
 		return err
 	}
-	if err := p.Conn.SetWriteBuffer(protocol.DesiredSendBufferSize); err != nil {
+	if err := p.Conn.SetWriteBuffer(protocol.DesiredSendBufferSize()); err != nil {
 		return err
 	}
 
@@ -187,10 +187,10 @@ func (p *Proxy) Start() error {
 // SwitchConn switches the connection for a client,
 // identified the address that the client is sending from.
 func (p *Proxy) SwitchConn(clientAddr *net.UDPAddr, conn *net.UDPConn) error {
-	if err := conn.SetReadBuffer(protocol.DesiredReceiveBufferSize); err != nil {
+	if err := conn.SetReadBuffer(protocol.DesiredReceiveBufferSize()); err != nil {
 		return err
 	}
-	if err := conn.SetWriteBuffer(protocol.DesiredSendBufferSize); err != nil {
+	if err := conn.SetWriteBuffer(protocol.DesiredSendBufferSize()); err != nil {
 		return err
 	}
 	p.mutex.Lock()
@@ -227,10 +227,10 @@ func (p *Proxy) newConnection(cliAddr *net.UDPAddr) (*connection, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := conn.SetReadBuffer(protocol.DesiredReceiveBufferSize); err != nil {
+	if err := conn.SetReadBuffer(protocol.DesiredReceiveBufferSize()); err != nil {
 		return nil, err
 	}
-	if err := conn.SetWriteBuffer(protocol.DesiredSendBufferSize); err != nil {
+	if err := conn.SetWriteBuffer(protocol.DesiredSendBufferSize()); err != nil {
 		return nil, err
 	}
 	return &connection{

@@ -5,7 +5,7 @@ import (
 	"reflect"
 	"testing"
 
-	tls "github.com/bogdanfinn/utls"
+	tls "github.com/Berserk-Automation-Hub/utls"
 
 	"github.com/stretchr/testify/require"
 )

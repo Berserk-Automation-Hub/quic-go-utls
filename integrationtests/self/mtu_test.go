@@ -10,11 +10,11 @@ import (
 	"testing"
 	"time"
 
-	"github.com/bogdanfinn/quic-go-utls"
-	quicproxy "github.com/bogdanfinn/quic-go-utls/integrationtests/tools/proxy"
-	"github.com/bogdanfinn/quic-go-utls/internal/protocol"
-	"github.com/bogdanfinn/quic-go-utls/qlog"
-	"github.com/bogdanfinn/quic-go-utls/testutils/events"
+	"github.com/Berserk-Automation-Hub/quic-go-utls"
+	quicproxy "github.com/Berserk-Automation-Hub/quic-go-utls/integrationtests/tools/proxy"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/protocol"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/qlog"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/testutils/events"
 
 	"github.com/stretchr/testify/require"
 )

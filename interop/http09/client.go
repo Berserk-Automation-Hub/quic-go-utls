@@ -9,12 +9,12 @@ import (
 	"strings"
 	"sync"
 
-	http "github.com/bogdanfinn/fhttp"
-	tls "github.com/bogdanfinn/utls"
+	http "github.com/Berserk-Automation-Hub/fhttp"
+	tls "github.com/Berserk-Automation-Hub/utls"
 
 	"golang.org/x/net/idna"
 
-	"github.com/bogdanfinn/quic-go-utls"
+	"github.com/Berserk-Automation-Hub/quic-go-utls"
 )
 
 // MethodGet0RTT allows a GET request to be sent using 0-RTT.

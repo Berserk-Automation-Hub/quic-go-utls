@@ -50,14 +50,14 @@ import (
 	"fmt"
 	"net"
 
-	tls "github.com/bogdanfinn/utls"
+	tls "github.com/Berserk-Automation-Hub/utls"
 
-	"github.com/bogdanfinn/quic-go-utls/internal/ackhandler"
-	"github.com/bogdanfinn/quic-go-utls/internal/handshake"
-	"github.com/bogdanfinn/quic-go-utls/internal/protocol"
-	"github.com/bogdanfinn/quic-go-utls/internal/utils"
-	"github.com/bogdanfinn/quic-go-utls/internal/wire"
-	"github.com/bogdanfinn/quic-go-utls/qlogwriter"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/ackhandler"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/handshake"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/protocol"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/utils"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/wire"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/qlogwriter"
 )
 
 // uSendsECNMarks is whether this connection ECN-marks the packets it SENDS. Chrome does not, ever

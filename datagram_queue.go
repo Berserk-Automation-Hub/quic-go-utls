@@ -4,9 +4,9 @@ import (
 	"context"
 	"sync"
 
-	"github.com/bogdanfinn/quic-go-utls/internal/utils"
-	"github.com/bogdanfinn/quic-go-utls/internal/utils/ringbuffer"
-	"github.com/bogdanfinn/quic-go-utls/internal/wire"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/utils"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/utils/ringbuffer"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/wire"
 )
 
 const (

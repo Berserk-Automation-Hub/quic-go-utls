@@ -4,7 +4,7 @@ package quic
 //
 // This file (and the other u_*.go files in this package, plus internal/handshake/u_crypto_setup.go
 // and internal/wire/u_transport_parameters.go) are the ONLY additions this vendored fork makes to
-// upstream github.com/bogdanfinn/quic-go-utls v1.0.9-utls. They let a caller pin every
+// upstream github.com/Berserk-Automation-Hub/quic-go-utls v1.0.9-utls. They let a caller pin every
 // passively-observable property of the QUIC Initial flight to a captured browser:
 //
 //   - the TLS ClientHello bytes            (utls ClientHelloSpec, via UQUICClient+ApplyPreset)
@@ -19,7 +19,7 @@ package quic
 import (
 	"crypto/rand"
 
-	tls "github.com/bogdanfinn/utls"
+	tls "github.com/Berserk-Automation-Hub/utls"
 )
 
 // DefaultUDPDatagramMinSize is the RFC 9000 §14.1 minimum for a datagram carrying an Initial.

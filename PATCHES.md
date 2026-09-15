@@ -137,3 +137,61 @@ decrypts our own Initials and asserts the whole right-hand column of the table a
 QUICHE's exact chaos-protector sequencing (which stream ranges land in which packet, and where the
 split points fall) is not reproduced; both stacks randomize per connection, so only the shape is
 comparable. Packet timing (pacing, ACK cadence, PMTU probing, retransmit timing) is quic-go's.
+
+---
+
+## Fork housekeeping (module path, current Go, restored upstream tests)
+
+Sightglass consumes this fork by plain `require` with no `replace`, so the module path is the fork's
+own and the utls/fhttp dependencies point at our forks of those:
+
+```
+module github.com/bogdanfinn/quic-go-utls -> github.com/Berserk-Automation-Hub/quic-go-utls
+       github.com/bogdanfinn/utls  v1.7.8-barnius -> .../utls  v1.7.8-sightglass.1
+       github.com/bogdanfinn/fhttp v0.6.9         -> .../fhttp v0.6.9-sightglass.1
+go 1.24.1 -> 1.27.0
+```
+
+Based on **v1.0.10-utls**, the latest upstream, not the v1.0.9-utls Sightglass pinned. The patch
+cherry-picked clean.
+
+### One real fix, found by restoring the tests the vendored copy dropped
+
+The socket-buffer patch turned `protocol.DesiredReceiveBufferSize` / `DesiredSendBufferSize` from
+`const int` into `func() int` (so the value can be per-Transport instead of a package global — that
+global was both a data race and a cross-profile fingerprint bleed). Six call sites in
+`integrationtests/tools/proxy/proxy.go` still used them as values:
+
+```
+integrationtests/tools/proxy/proxy.go:175:33: cannot use protocol.DesiredReceiveBufferSize
+    (value of type func() int) as int value in argument to p.Conn.SetReadBuffer
+```
+
+The vendored tree had no `integrationtests/`, so this never compiled anywhere and nobody saw it.
+All six now call the function.
+
+### Verification, against a pristine v1.0.10-utls baseline
+
+```
+fork:     1 failing package    pristine: 10 failing packages
+REGRESSIONS: none
+```
+
+Pristine's ten are all one cause — `internal/synctest` imports `testing/synctest`, which
+`go 1.24.1` excludes; raising the directive to 1.27.0 fixes all ten.
+
+### Residual (HR-7)
+
+`integrationtests/self` does not build, **in this fork and in pristine upstream alike**:
+
+```
+integrationtests/self/self_go125_test.go:8:19: connState.CurveID undefined
+    (type utls.ConnectionState has no field or method CurveID)
+```
+
+That test assumes the standard library's `tls.ConnectionState`, which gained `CurveID` in Go 1.25;
+utls carries its own `ConnectionState` type and does not expose it. It is an upstream
+quic-go-vs-utls mismatch, not a consequence of anything here, and it is not on any path Sightglass
+uses. Closing it would mean adding a field to utls's public `ConnectionState`, which is a change to a
+TLS library's API surface for the benefit of one integration test — deliberately not done, and
+recorded rather than hidden.

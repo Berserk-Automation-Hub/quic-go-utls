@@ -7,7 +7,7 @@ import (
 	"hash"
 	"sync"
 
-	"github.com/bogdanfinn/quic-go-utls/internal/protocol"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/protocol"
 )
 
 type statelessResetter struct {
