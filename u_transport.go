@@ -7,6 +7,7 @@ package quic
 import (
 	"context"
 	"errors"
+	"fmt"
 	"net"
 
 	tls "github.com/Berserk-Automation-Hub/utls"
@@ -39,6 +40,13 @@ func (t *UTransport) dialSpec(ctx context.Context, addr net.Addr, host string, t
 	}
 	if t.QUICSpec.ClientHelloSpec == nil {
 		return nil, errors.New("quic u-layer: QUICSpec.ClientHelloSpec is nil")
+	}
+	// RFC 9000 §17.2 gives the connection-ID length field 8 bits but caps the value at 20, and
+	// protocol.GenerateConnectionID slices a fixed 20-byte array, so anything larger panics deep
+	// inside the dial with "slice bounds out of range" instead of naming the profile field that is
+	// wrong. Both lengths are profile data, so both are bounded here and reported by name.
+	if l := t.QUICSpec.InitialPacketSpec.SrcConnIDLength; l < 0 || l > protocol.MaxConnIDLen {
+		return nil, fmt.Errorf("quic u-layer: SrcConnIDLength %d is outside the RFC 9000 §17.2 range 0..%d", l, protocol.MaxConnIDLen)
 	}
 	// The Source Connection ID length is a spec property, so it must be pinned before Transport.init
 	// caches its generator. Both halves below are load-bearing and neither can stand without the
@@ -178,6 +186,9 @@ func (t *UTransport) uGenerateDestConnID() (protocol.ConnectionID, error) {
 	}
 	if l < protocol.MinConnectionIDLenInitial {
 		return protocol.ConnectionID{}, errors.New("quic u-layer: DestConnIDLength below the RFC 9000 minimum of 8")
+	}
+	if l > protocol.MaxConnIDLen {
+		return protocol.ConnectionID{}, fmt.Errorf("quic u-layer: DestConnIDLength %d above the RFC 9000 §17.2 maximum of %d", l, protocol.MaxConnIDLen)
 	}
 	return protocol.GenerateConnectionID(l)
 }

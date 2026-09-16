@@ -306,7 +306,16 @@ suite was run, and the exact failure text recorded. All were then restored.
 | E18 | ClientHello built from `tls.Config` rather than the spec | `TestUCryptoSetupClientHelloComesFromTheSpec` | `the ClientHello's cipher suites are not the spec's, in the spec's order: the hello was built from tls.Config` (`expected []uint16{0x1303,0x1302,0x1301} / actual []uint16{0x1301}`) |
 | E19 | apply the TLS 1.3 floor BEFORE `ApplyPreset` (where `ApplyPreset` overwrites it) | `TestUCryptoSetupPinsTLS13RegardlessOfTheConfig/the_spec's_supported_versions_lists_TLS_1.2` | `Received unexpected error: CRYPTO_ERROR 0x150 (local): tls: Config MinVersion must be at least TLS 1.13` |
 | E20 | do not clone the caller's `tls.Config` | `TestUCryptoSetupPinsTLS13RegardlessOfTheConfig/the_caller's_Config_says_TLS_1.2` | `NewUCryptoSetupClient mutated the CALLER's tls.Config (MinVersion is now 0x0304); it must clone it first` |
+| E22 | drop the RFC 9000 §17.2 upper bound on `DestConnIDLength` | `TestUTransportRejectsAConnectionIDLengthAboveTheRFCMaximum/destination` | `panic: runtime error: slice bounds out of range [:21] with length 20 … internal/protocol.GenerateConnectionID(…) connection_id.go:44 … (*UTransport).uGenerateDestConnID u_transport.go:191` |
+| E23 | drop the `SrcConnIDLength` range check | `TestUTransportRejectsAConnectionIDLengthAboveTheRFCMaximum/source` | same panic, from `Transport.init`'s connection-ID generator |
 | E21 | drop `EnableSessionEvents` | `TestUCryptoSetupStoresAResumptionTicket` | `the cached session carries no quic-go session data: no QUICStoreSession event fired, so 0-RTT is structurally impossible on this connection` |
+
+**E22/E23 were a real defect, and the panic above is the one the audit recorded from a profile
+document.** RFC 9000 §17.2 caps a connection ID at 20 bytes and `protocol.GenerateConnectionID`
+slices a fixed 20-byte array, so `http3.initial.dest_conn_id_length: 21` — a value a profile can
+perfectly well contain — panicked inside `connection_id.go`, several frames below any code that
+knows the word "profile". Both lengths now fail at the point where the document enters the library,
+with the field named.
 
 **E19 was a real defect, found by trying to ablate it.** The TLS 1.3 floor used to be written before
 `uc.ApplyPreset(chs)`, and `ApplyPreset` -> `UConn.SetTLSVers` writes a `MinVersion` derived from the

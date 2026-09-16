@@ -358,6 +358,42 @@ func TestUTransportRejectsAnUndiallableDestConnIDLength(t *testing.T) {
 	require.EqualError(t, err, "quic u-layer: DestConnIDLength below the RFC 9000 minimum of 8")
 }
 
+// TestUTransportRejectsAConnectionIDLengthAboveTheRFCMaximum: RFC 9000 §17.2 caps a connection ID at
+// 20 bytes, and protocol.GenerateConnectionID slices a fixed 20-byte array — so a profile that
+// declares 21 used to panic with "slice bounds out of range [:21] with length 20" from inside
+// connection_id.go, several frames below any code that knows the word "profile". Both lengths come
+// from the document, so both are bounded where the document enters the library and the error names
+// the field (HR-6: loud-fail, and loudly enough to be actionable).
+func TestUTransportRejectsAConnectionIDLengthAboveTheRFCMaximum(t *testing.T) {
+	cli, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	require.NoError(t, err)
+	defer cli.Close()
+	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1}
+
+	t.Run("destination", func(t *testing.T) {
+		spec := uTestSpec()
+		spec.InitialPacketSpec.DestConnIDLength = protocol.MaxConnIDLen + 1
+		tr := &UTransport{Transport: &Transport{Conn: cli}, QUICSpec: spec}
+		defer tr.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		defer cancel()
+		_, err := tr.Dial(ctx, addr, uTestTLSConfig(), uTestQUICConfig())
+		require.EqualError(t, err, fmt.Sprintf("quic u-layer: DestConnIDLength 21 above the RFC 9000 §17.2 maximum of %d", protocol.MaxConnIDLen))
+	})
+
+	t.Run("source", func(t *testing.T) {
+		for _, l := range []int{protocol.MaxConnIDLen + 1, -1} {
+			spec := uTestSpec()
+			spec.InitialPacketSpec.SrcConnIDLength = l
+			tr := &UTransport{Transport: &Transport{Conn: cli}, QUICSpec: spec}
+			ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+			_, err := tr.Dial(ctx, addr, uTestTLSConfig(), uTestQUICConfig())
+			cancel()
+			require.EqualError(t, err, fmt.Sprintf("quic u-layer: SrcConnIDLength %d is outside the RFC 9000 §17.2 range 0..%d", l, protocol.MaxConnIDLen))
+		}
+	})
+}
+
 // TestUTransportDoesNotECNMarkWhatItSends: upstream quic-go runs RFC 9000 §13.4.2 ECN validation and
 // stamps ECT(0) into the IP header of its one-RTT datagrams. Chrome never marks. The u-layer's
 // connection passes a false `enableECN` to the sent-packet handler, so the send side must report
