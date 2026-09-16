@@ -55,8 +55,14 @@ type closePacket struct {
 // A Transport handles a single net.PacketConn, and offers a range of configuration options
 // compared to the simple helper functions like [Listen] and [Dial] that this package provides.
 type Transport struct {
-	// U-LAYER (additive): this Transport's own UDP socket buffer targets. 0 = package defaults.
-	// See the note on Transport.init.
+	// U-LAYER (additive): this Transport's OWN UDP socket buffer targets — SO_RCVBUF and
+	// SO_SNDBUF on the socket this Transport wraps, and on no other socket in the process.
+	//
+	//	0                     — package defaults (upstream quic-go's 7 MB), the zero value.
+	//	> 0                   — raise the buffer to exactly this.
+	//	UDoNotSetSocketBuffer — the profile declares no buffer: leave the option alone entirely.
+	//
+	// See the note on Transport.init and u_conn_buffers.go.
 	UDesiredReceiveBufferSize int
 	UDesiredSendBufferSize    int
 
@@ -383,14 +389,16 @@ func (t *Transport) doDial(
 
 // U-LAYER (browser parroting): UDesiredReceiveBufferSize / UDesiredSendBufferSize are this
 // Transport's OWN SO_RCVBUF / SO_SNDBUF targets. Zero means "use the package-level defaults"
-// (protocol.DesiredReceiveBufferSize() / DesiredSendBufferSize), which is upstream behaviour.
+// (protocol.DesiredReceiveBufferSize / DesiredSendBufferSize), which is upstream behaviour;
+// UDoNotSetSocketBuffer means "the profile declares none, so touch nothing".
 //
 // WHY PER-TRANSPORT AND NOT GLOBAL. The socket buffer pair is one of the only two UDP socket options
 // an application chooses, so it is part of the identity a profile declares
 // (http3.engine.socket_receive_buffer / .socket_send_buffer). With ONE process-wide pair, two
 // profiles dialling concurrently could each wrap the other's socket with the other's sizes — a
 // cross-identity fingerprint bleed — and the unsynchronised writes were a data race besides. Setting
-// them on the Transport that owns the socket removes both.
+// them on the Transport that owns the socket removes both, and there is no longer any package-level
+// setter through which a second session could reach the first one's socket.
 func (t *Transport) init(allowZeroLengthConnIDs bool) error {
 	t.initOnce.Do(func() {
 		var conn rawConn

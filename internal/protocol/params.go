@@ -1,45 +1,12 @@
 package protocol
 
-import (
-	"sync/atomic"
-	"time"
-)
+import "time"
 
-// DesiredReceiveBufferSize / DesiredSendBufferSize are the kernel UDP buffer sizes wrapConn asks
-// the socket for.
-//
-// U-LAYER (browser parroting): upstream declares these as consts of 7 MB. Chrome 152 pins them to
-// its own values (net/quic/quic_context.h kQuicSocketReceiveBufferSize and
-// net/quic/quic_session_pool.cc kMaxOutgoingPacketSize*20), so they must be settable — set them with
-// SetDesiredBufferSizes() (../../u_conn_buffers.go) before creating a Transport.
-//
-// THEY ARE ATOMIC, not plain vars. A plain var was a genuine DATA RACE the moment two connections
-// were dialled concurrently: every dial calls quich3.ApplyEngineSocketBuffers -> SetDesiredBufferSizes
-// (an unsynchronised WRITE) while another dial's wrapConn READS them. `go test -race` reports it, and
-// the consequence is worse than the report: with two PROFILES in one process, a connection could be
-// wrapped with the OTHER profile's SO_RCVBUF/SO_SNDBUF — a cross-identity fingerprint bleed on the
-// one pair of socket options an application actually chooses.
-var (
-	desiredReceiveBufferSize atomic.Int64
-	desiredSendBufferSize    atomic.Int64
-)
+// DesiredReceiveBufferSize is the kernel UDP receive buffer size that we'd like to use.
+const DesiredReceiveBufferSize = (1 << 20) * 7 // 7 MB
 
-func init() {
-	desiredReceiveBufferSize.Store((1 << 20) * 7) // 7 MB (upstream default)
-	desiredSendBufferSize.Store((1 << 20) * 7)    // 7 MB (upstream default)
-}
-
-// DesiredReceiveBufferSize returns the SO_RCVBUF target.
-func DesiredReceiveBufferSize() int { return int(desiredReceiveBufferSize.Load()) }
-
-// SetDesiredReceiveBufferSize sets the SO_RCVBUF target.
-func SetDesiredReceiveBufferSize(n int) { desiredReceiveBufferSize.Store(int64(n)) }
-
-// DesiredSendBufferSize returns the SO_SNDBUF target.
-func DesiredSendBufferSize() int { return int(desiredSendBufferSize.Load()) }
-
-// SetDesiredSendBufferSize sets the SO_SNDBUF target.
-func SetDesiredSendBufferSize(n int) { desiredSendBufferSize.Store(int64(n)) }
+// DesiredSendBufferSize is the kernel UDP send buffer size that we'd like to use.
+const DesiredSendBufferSize = (1 << 20) * 7 // 7 MB
 
 // InitialPacketSize is the initial (before Path MTU discovery) maximum packet size used.
 const InitialPacketSize = 1280

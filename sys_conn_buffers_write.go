@@ -15,10 +15,22 @@ import (
 
 func setSendBuffer(c net.PacketConn) error { return setSendBufferTo(c, 0) }
 
-// setSendBufferTo raises the socket send buffer to `want` (0 = the package default).
+// setSendBufferTo raises the socket send buffer to `want`.
+//
+// U-LAYER: `want` is tri-state, and the three states are the three things a caller can mean.
+//
+//	0                     — the caller expressed no opinion: use the package default, which is
+//	                        upstream quic-go's behaviour and the zero value of Transport's field.
+//	> 0                   — raise the buffer to exactly this, the value the profile declares.
+//	UDoNotSetSocketBuffer — the profile declares NO socket buffer. Leave the option at the kernel
+//	                        default and issue no setsockopt at all; substituting the library's 7 MB
+//	                        for an absent value would be inventing a fingerprint nobody measured.
 func setSendBufferTo(c net.PacketConn, want int) error {
-	if want <= 0 {
-		want = protocol.DesiredSendBufferSize()
+	if want < 0 {
+		return nil
+	}
+	if want == 0 {
+		want = protocol.DesiredSendBufferSize
 	}
 	conn, ok := c.(interface{ SetWriteBuffer(int) error })
 	if !ok {
