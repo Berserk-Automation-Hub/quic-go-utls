@@ -66,13 +66,32 @@ func (t *UTransport) dialSpec(ctx context.Context, addr net.Addr, host string, t
 	// unless allowZeroLengthConnIDs says otherwise. A spec-driven client owns its socket outright,
 	// so it does not need a non-empty connection ID to demultiplex on.
 	//
-	// An explicit ConnectionIDGenerator or ConnectionIDLength on the Transport wins: the spec pins
-	// what the caller left open, it does not overwrite what the caller decided.
+	// The assignment is skipped when the caller made its own connection-ID decision, because
+	// overwriting it here would be silent either way; what happens instead is the check AFTER init,
+	// which refuses the dial rather than sending a length the spec never asked for.
 	if t.ConnectionIDGenerator == nil && t.ConnectionIDLength == 0 {
 		t.ConnectionIDLength = t.QUICSpec.InitialPacketSpec.SrcConnIDLength
 	}
 	if err := t.init(true); err != nil {
 		return nil, err
+	}
+	// Transport.init caches ONE connection-ID generator for the life of the Transport (it runs under
+	// a sync.Once), so whatever it settled on above is the Source Connection ID length every dial on
+	// this Transport will put in its long header — including dials whose spec pins something else.
+	// Two ways to arrive here with a mismatch, neither of which can be honoured after the fact:
+	//
+	//   - the caller set Transport.ConnectionIDLength or Transport.ConnectionIDGenerator itself, so
+	//     the `if` above deliberately left it alone; or
+	//   - an EARLIER dial on this same Transport pinned a different spec's length, and init is a
+	//     no-op the second time.
+	//
+	// Silently sending the other length is the failure this fork exists to prevent: the SCID length
+	// is in clear text in every long header, so a dial that quietly used 4 bytes where the profile
+	// declares 0 wears a fingerprint the document never declared. HR-6 — loud-fail, never substitute.
+	if got := t.connIDGenerator.ConnectionIDLen(); got != t.QUICSpec.InitialPacketSpec.SrcConnIDLength {
+		return nil, fmt.Errorf(
+			"quic u-layer: this Transport issues %d-byte source connection IDs and this dial's spec pins SrcConnIDLength %d; a Transport's connection-ID generator is fixed at its first dial, so one Transport cannot send both",
+			got, t.QUICSpec.InitialPacketSpec.SrcConnIDLength)
 	}
 	if err := validateConfig(conf); err != nil {
 		return nil, err

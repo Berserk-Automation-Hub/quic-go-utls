@@ -37,7 +37,7 @@ Source (8):
 | `u_quic_frames.go` | `QUICFrameBuilder` + `QUICRandomFrames`: lays one Initial packet's CRYPTO stream slices out as randomly split, shuffled CRYPTO frames interleaved with PING and PADDING, filling the packet **exactly**. All randomness from `crypto/rand`. |
 | `u_packet_packer.go` | `uPacketPacker`: an Initial carrying CRYPTO becomes a standalone datagram of exactly `Config.InitialPacketSize`, framed by the builder, with the spec's packet-number length on the first one. Every other packet is packed by upstream code. |
 | `u_connection.go` | `newUClientConnection`: mirrors `newClientConnection`, but takes the local transport parameters from the ClientHello spec, installs the u crypto setup and the u packer, and passes `uSendsECNMarks` (false) as the sent-packet handler's `enableECN`. |
-| `u_transport.go` | `UTransport`: mirrors `Transport.dialEarly`/`doDial`, pinning the source and destination connection-ID lengths and the first Initial packet number. `DialEarly` is its ONLY dial entry point — see §5 for why the non-early `Dial` was deleted. |
+| `u_transport.go` | `UTransport`: mirrors `Transport.dialEarly`/`doDial`, pinning the source and destination connection-ID lengths and the first Initial packet number, refusing a dial whose spec disagrees with the connection-ID generator the Transport already cached (§7 E3c/E26), and generating the first-flight Destination Connection ID from `crypto/rand` at the spec's length. `DialEarly` is its ONLY dial entry point — see §5 for why the non-early `Dial` was deleted. |
 | `u_conn_buffers.go` | `UDoNotSetSocketBuffer` — the "this profile declares no socket buffer" value for the per-Transport SO_RCVBUF/SO_SNDBUF targets, and the note explaining why there is no package-level setter any more. |
 | `internal/handshake/u_crypto_setup.go` | `NewUCryptoSetupClient` — `tls.UQUICClient(...)` + `ApplyPreset(spec)`; the `tlsQUICConn` interface and the `*tls.UQUICConn` adapter. |
 | `internal/wire/u_transport_parameters.go` | `TransportParameters.PopulateFromUQUIC` — derives quic-go's local flow-control view from the utls transport-parameter extension, so we police exactly what we advertised. |
@@ -192,12 +192,16 @@ reaches when Sightglass drives it.
 | `u_quic_spec.go` | 0.0% (0/12) | **91.7%** (11/12) | 41.7% (5/12) |
 | `u_connection.go` | 0.0% (0/63) | **87.3%** (55/63) | 76.2% (48/63) |
 | `u_quic_frames.go` | 0.0% (0/100) | **85.0%** (85/100) | 77.0% (77/100) |
-| `u_transport.go` | 0.0% (0/85) | **85.2%** (75/88) | 75.0% (66/88) |
+| `u_transport.go` | 0.0% (0/85) | **88.9%** (80/90) | 74.4% (67/90) |
 | `u_packet_packer.go` | 0.0% (0/84) | **75.0%** (63/84) | 72.6% (61/84) |
-| **u-layer total** | **0.0% (0/402)** | **85.4% (345/404)** | **75.5% (305/404)** |
+| **u-layer total** | **0.0% (0/402)** | **86.2% (350/406)** | **75.4% (306/406)** |
 
-(402 -> 404 statements: `QUICSpec.UDPDatagramMinSize` and `UTransport.Dial` were deleted, and the
-`uDialsEarly` branch in `uDoDial` was added — §5.)
+(402 -> 406 statements: `QUICSpec.UDPDatagramMinSize` and `UTransport.Dial` were deleted, the
+`uDialsEarly` branch in `uDoDial` was added (§5), and the post-`init` connection-ID agreement check
+this round added two more — E3c/E26 below. Its `if` executes on the shipped path (`u_transport.go:91`
+is `1` in the shipped-path profile) and its refusal branch does not, which is the intended shape: no
+Sightglass session sets `Transport.ConnectionIDLength` or `ConnectionIDGenerator`, and every session
+builds its own `Transport` (`go/quich3/h3client.go:613`).)
 
 **The tests drive `DialEarly`, which is the function Sightglass calls, and it is the only one there
 is.** An earlier revision of this file had every one of these tests calling `UTransport.Dial`
@@ -222,7 +226,7 @@ document; this fork contains no engine identity (HR-5).
 |---|---|---|---|
 | `uPacketPacker.PackPTOProbePacket` (`u_packet_packer.go:48`) | 66.7% | 0.0% | KEPT. A PTO probe only fires when an Initial is lost, which a 1.3-second loopback test never does; the shipped path reaches it the first time a real network drops a ClientHello. Deleting it would send the RETRANSMITTED Initial with upstream quic-go's framing while the original carried the browser's — a tell that only appears under loss, which is the worst kind. Exercised by the fork suite. |
 | `dummyTokenStore.Pop` (`u_quic_spec.go:93`) | 75.0% | 0.0% | KEPT as profile-driven surface (HR-9). `getTokenStore` installs it only when a profile declares `http3.initial.client_token_length > 0`, and no profile shipped today does: `sightglass/profiles/chrome-152.json:354` says `"client_token_length": 0` and firefox-148/firefox-156 omit the key. The PLUMBING is live and shipped — `go/sightglass/profile_net.go:603` parses the field and `go/quich3/spec.go:692` hands it to `InitialPacketSpec.ClientTokenLength` — so this is a document-driven branch nobody's document takes, not a function nothing calls. Deleting it would make a declared profile field silently do nothing, which is exactly the defect `UDPDatagramMinSize` was deleted for. Guarded by `TestUSpecTokenLengthInstallsATokenStore` (ablation E17). |
-| `dummyTokenStore.Put` (`u_quic_spec.go:101`) | reported 0.0%, and the report is an artefact | 0.0% | KEPT, same reason. Its body is EMPTY — a dummy store must cache nothing — so it contains zero statements and `go tool cover -func` divides 0 by 0. The profile shows the block as `u_quic_spec.go:101.54,101.54 0 1`: **zero statements, one execution**, from `u_quic_spec_test.go:28`. It is called, not uncalled. |
+| `dummyTokenStore.Put` (`u_quic_spec.go:101`) | reported 0.0%, and the report is an artefact | reported 0.0%, and it genuinely is not called there | KEPT, same reason as `Pop`: it is the other half of a `TokenStore`, and the interface cannot be satisfied without it. Its body is EMPTY — a dummy store must cache nothing — so it contains zero statements and `go tool cover -func` divides 0 by 0 in BOTH profiles. The two profiles differ and an earlier revision of this row quoted the wrong one as if it were the shipped-path number: the FORK-suite profile shows `u_quic_spec.go:101.54,101.54 0 1` (zero statements, one execution, from `u_quic_spec_test.go:28`), while the SHIPPED-PATH profile shows `0 0` — zero executions, because the shipped path only reaches a token store at all when a profile declares `client_token_length > 0` and none does (see the `Pop` row). Called by the fork suite, not called on the shipped path, and 0.0% in neither case means "uncovered". |
 
 ## 4. The socket-buffer targets are no longer process-global
 
@@ -354,11 +358,19 @@ comparable. Packet timing (pacing, ACK cadence, PMTU probing, retransmit timing)
 
 ## 7. Ablation record
 
-"A guard I have not broken is not a guard." Each of the **30** elements below was reverted **on its
+"A guard I have not broken is not a guard." Each of the **32** elements below was reverted **on its
 own**, the named test was run, and the exact failure text recorded. All were then restored
 (`git status --short` clean of every ablation file afterwards).
 
-Two things about this table that were not true of the one it replaces:
+Three things about this table that were not true of the one it replaces:
+
+* **Four mutations that used to leave the suite green now turn it red**, and they were found by a
+  certifier attacking the previous revision of this table, not by us: a zero-entropy Destination
+  Connection ID (E24, twice), the two packet-number pins replaced by the browser's own values as
+  library constants (E5/E6 — the HR-5 defect itself), and the "explicit caller wins" connection-ID
+  condition (E3c/E26). Each has its own section below. Nothing in this table is claimed to be
+  guarded that has not been turned red on this machine, and the one element that still has no guard
+  is named as such.
 
 * **Every dial-path ablation drives `UTransport.DialEarly`**, the only entry point this fork has and
   the only one `go/quich3/h3client.go:646` calls. The previous table ablated `UTransport.Dial`
@@ -378,9 +390,10 @@ Two things about this table that were not true of the one it replaces:
 | E2c | `protocol.DesiredReceiveBufferSize` back to a `var` | whole package | `./u_conn_buffers_test.go:29:6: protocol.DesiredReceiveBufferSize (variable of type int) is not constant` |
 | E3a | drop the spec's `SrcConnIDLength` pin | `TestUTransportPinsWhateverSourceConnectionIDLengthTheSpecAsks/*` (3/3) | `the spec asked for a 3 byte source connection ID and the wire carries 0` |
 | E3b | `t.init(false)` — upstream's refusal of a zero-length SCID | `TestUTransportPinsTheInitialPacketShapeOnTheWire` | `Source Connection ID is 4 bytes, the spec pins 0 (upstream defaults to 4)` |
+| E3c | the pre-`init` condition `if t.ConnectionIDGenerator == nil && t.ConnectionIDLength == 0` made UNCONDITIONAL, so a spec silently overwrites the connection-ID decision a caller made itself | `TestUTransportRefusesASpecThisTransportCannotHonour/the_caller_pinned_the_Transport's_own_connection-ID_length` | `expected: "quic u-layer: this Transport issues 4-byte source connection IDs and this dial's spec pins SrcConnIDLength 0; a Transport's connection-ID generator is fixed at its first dial, so one Transport cannot send both" / actual: "context deadline exceeded"` — `the dial went ahead although the Transport pins a 4-byte source connection ID and the spec pins 0: one of those two is silently not what left the socket` |
 | E4 | `uGenerateDestConnID` ignores `DestConnIDLength` | `TestUTransportPinsTheInitialPacketShapeOnTheWire`, `TestUTransportGeneratesAFreshDestConnIDEveryDial` | `Destination Connection ID is 10 bytes, the spec pins 8 (upstream picks a random length in [8,20])` (and `expected: 8 / actual: 20` in the second) |
-| E5 | dial with packet number 0 instead of the spec's | `TestUTransportPinsTheInitialPacketShapeOnTheWire` | `first Initial packet number is 0, the spec pins 1 (upstream always starts at 0)` |
-| E6 | let upstream choose the first Initial's packet-number length | `TestUTransportPinsTheInitialPacketShapeOnTheWire` | `first Initial packet-number field is 2 bytes, the spec pins 1 (upstream emits only 2 or 4)` |
+| E5 | the first Initial's packet NUMBER, two mutations: (i) dial with packet number 0 instead of the spec's; (ii) `protocol.PacketNumber(t.QUICSpec.InitialPacketSpec.InitPacketNumber)` -> the constant `protocol.PacketNumber(1)` — the browser's own value burned into library code (HR-5) | (i) `TestUTransportPinsTheInitialPacketShapeOnTheWire`; (ii) `TestUTransportPinsWhateverFirstPacketNumberTheSpecAsks/*` (4/4) | (i) `first Initial packet number is 0, the spec pins 1 (upstream always starts at 0)`; (ii) `the spec asked for first Initial packet number 7 and the wire carries 1` (and 42, 3, 2 in the other three cases) |
+| E6 | the first Initial's packet-number FIELD WIDTH, two mutations: (i) let upstream choose it; (ii) `hdr.PacketNumberLen = protocol.PacketNumberLen(n)` -> the constant `protocol.PacketNumberLen(1)` — again the browser's own value as a library constant (HR-5) | (i) `TestUTransportPinsTheInitialPacketShapeOnTheWire`; (ii) `TestUTransportPinsWhateverFirstPacketNumberTheSpecAsks/*` (3/4 — the 1-byte case is what the mutation hard-codes, so it cannot fail) | (i) `first Initial packet-number field is 2 bytes, the spec pins 1 (upstream emits only 2 or 4)`; (ii) `the spec asked for a 2-byte packet-number field and the wire carries 1` (and 3, 4) |
 | E7 | `useSpecInitial` always false — upstream framing | `TestUTransportLaysTheInitialOutWithTheSpecsFrameBuilder` | `the Initial carries no PING frames: the spec's frame builder did not lay this packet out` |
 | E8 | drop the `crypto/rand` Fisher-Yates shuffle | `TestUQUICRandomFramesShufflesTheFrameOrder` | `in 60 builds the lowest-offset CRYPTO frame was always at position map[0:60]: the frame order is not shuffled, so the Initial layout is a constant tell` |
 | E9a | do not call `PopulateFromUQUIC` | `TestUTransportLocalFlowControlComesFromTheSpec` | `quic-go believes it advertised initial_max_data 262144; the ClientHello spec says 15728640` |
@@ -399,20 +412,105 @@ Two things about this table that were not true of the one it replaces:
 | E21 | drop `EnableSessionEvents` | `TestUCryptoSetupStoresAResumptionTicket` | `the cached session carries no quic-go session data: no QUICStoreSession event fired, so 0-RTT is structurally impossible on this connection` (`Should NOT be empty, but was []`) |
 | E22 | drop the RFC 9000 §17.2 upper bound on `DestConnIDLength` | `TestUTransportRejectsAConnectionIDLengthAboveTheRFCMaximum/destination` | `panic: runtime error: slice bounds out of range [:21] with length 20 … internal/protocol.GenerateConnectionID(…) connection_id.go:44 … (*UTransport).uGenerateDestConnID u_transport.go:199` |
 | E23 | drop the `SrcConnIDLength` range check | `TestUTransportRejectsAConnectionIDLengthAboveTheRFCMaximum/source` | same panic, from `Transport.init`'s connection-ID generator (`internal/protocol.(*DefaultConnectionIDGenerator).GenerateConnectionID … connection_id.go:111`) |
-| E24 | `uGenerateDestConnID` returns a CONSTANT of the right length (`bytes.Repeat([]byte{0xAB}, l)`) instead of `protocol.GenerateConnectionID(l)` | `TestUTransportGeneratesAFreshDestConnIDEveryDial` | `3 dials produced only 1 distinct Destination Connection ID(s) ([abababababababab abababababababab abababababababab]): the first-flight DCID is not freshly random, so every connection from this host is linkable by its Initial header` |
+| E24 | `uGenerateDestConnID` returns something that is not random, three mutations: (i) a CONSTANT of the right length (`bytes.Repeat([]byte{0xAB}, l)`); (ii) a big-endian `time.Now().UnixNano()` — no `crypto/rand` anywhere; (iii) `crypto/rand` with the first FIVE of eight bytes forced to `0x11` | `TestUTransportGeneratesAFreshDestConnIDEveryDial` (all three) and `TestUTransportDestConnIDIsUniformlyRandom` (ii, iii) | (i) `3 dials produced only 1 distinct Destination Connection ID(s) ([abababababababab abababababababab abababababababab]): the first-flight DCID is not freshly random, so every connection from this host is linkable by its Initial header`; (ii) `4 of 8 byte positions are identical across all three Destination Connection IDs ([18d5f0725764c500 18d5f07299183e28 18d5f072dad4ac48]): the DCID is structured, not random` and `byte 0 of the Destination Connection ID took only 1 of 256 possible values in 4096 generations: that position is not random, so every Initial this host sends carries a stable pattern any observer on the path can link`; (iii) `5 of 8 byte positions are identical across all three Destination Connection IDs ([111111111126465d 1111111111fdf313 1111111111d35efb]): the DCID is structured, not random` and the same byte-0 failure |
 | E25 | `uDialsEarly` -> `false` (the u-layer stops attempting 0-RTT) | `quich3.TestQUICResumptionHelloMatchesChromeQJA4` (Sightglass, shipped path) | `warm q-JA4 = q13d0313h3_55b375c5d22e_b0954bf1abdf, want q13d0314h3_55b375c5d22e_79cc91d6b50c` — the warm ClientHello loses `early_data` (0x002a) and emits a q-JA4 no Chrome emits |
+| E26 | drop the post-`init` check that the Transport's connection-ID generator agrees with the spec's `SrcConnIDLength` | both subtests of `TestUTransportRefusesASpecThisTransportCannotHonour` | `expected: "quic u-layer: this Transport issues 3-byte source connection IDs and this dial's spec pins SrcConnIDLength 5; a Transport's connection-ID generator is fixed at its first dial, so one Transport cannot send both" / actual: "context deadline exceeded"` — `the second session was served the first session's source connection ID length instead of its own` |
 
-### E24 is here because the reverse attack worked
+### E24 is here because the reverse attack worked TWICE
 
-The previous round's table had a DCID row (E4) that only asserted the LENGTH. A certifier replaced
+**Round one.** The table's DCID row (E4) only asserted the LENGTH. A certifier replaced
 `protocol.GenerateConnectionID(l)` with a fixed `0xAB`-filled ID **of the correct length** and the
 entire fork suite stayed green (`ok … 9.225s`), while on the Sightglass side the only fallout was
 `Connect: … APPLICATION_ERROR (remote)` and `timeout: no recent network activity` — failures that
 merely differ and do not describe the defect, which C1 forbids. A constant first-flight Destination
 Connection ID is a catastrophic linkability tell: it is in clear text in every client Initial and it
 is what RFC 9001 §5.2 derives the Initial keys from. `TestUTransportGeneratesAFreshDestConnIDEveryDial`
-reads the DCID off the wire on three separate dials, requires three distinct values, and then
-requires that they do not share most byte positions — so a counter or a timestamp fails it too.
+was written for it: three dials, three distinct DCIDs read off the wire.
+
+**Round two, and this is the part the previous revision of this file got wrong.** That test also
+required that the three IDs not share "most" byte positions, and this file claimed the consequence
+that **"a counter or a timestamp fails it too"**. It did not. The threshold was
+`require.Less(shared, uTestDCIDLen-2)` — up to FIVE of eight byte positions could be identical — and
+a certifier walked two mutations straight through it:
+
+```
+uGenerateDestConnID -> big-endian time.Now().UnixNano(), no crypto/rand at all   ok … 4.945s
+uGenerateDestConnID -> crypto/rand with the first five of eight bytes = 0x11     ok … 4.865s
+```
+
+Three dials about 1.1 s apart differ in a nanosecond timestamp's low four bytes, so the timestamp
+scored `shared = 4` and passed under a threshold of 6. **The sentence was false and it has been
+deleted rather than softened**; the same claim was repeated in `docs/PROGRAMME.md` F65 and in
+`docs/tasks.json` T0482 and has been corrected in both. What replaces it is two guards, because one
+of them cannot be run enough times to measure randomness:
+
+* `TestUTransportGeneratesAFreshDestConnIDEveryDial` — unchanged in what it reads (the DCID off the
+  WIRE, on three real dials) but the tolerance is now **one** shared byte position, not five. Three
+  uniform 8-byte values share a given position with probability 2^-16, so "two or more shared" has
+  probability 28·2^-32 ≈ 6·10^-9: it cannot flake, and a timestamp (4) or a five-byte prefix (5) or a
+  counter (7) fails it.
+* `TestUTransportDestConnIDIsUniformlyRandom` — 4096 calls to the same `(*UTransport).uGenerateDestConnID`
+  the dial calls (`uDoDial` <- `dialSpec` <- `DialEarly` <- `go/quich3/h3client.go:646`), requiring
+  that **every byte position takes at least 250 of its 256 values** and every bit is set between 40%
+  and 60% of the time. In 4096 uniform draws a value is missed with probability (255/256)^4096 =
+  1.1e-7, so both thresholds are tens of standard deviations from anything random, and both are far
+  outside anything structured: a constant or timestamp position scores 1.
+
+**What this pair does NOT catch, stated plainly rather than claimed away.** A keyed PRF — AES or
+SHA-256 of a counter — is uniform by construction and passes both. No statistical test can separate
+one from randomness without the key, so no test here pretends to. What is excluded is the whole
+family a real mistake produces: constants, counters, timestamps, per-host prefixes, truncated or
+biased randomness, and reuse across dials.
+
+### E5/E6 are here because the HR-5 reverse attack worked
+
+Every other u-layer test drives the single pair (first Initial packet number 1, 1-byte packet-number
+field), which is what the browser this fork was written for happens to send. A certifier therefore
+replaced the two profile reads with that browser's values as literals:
+
+```
+dialSpec:        protocol.PacketNumber(t.QUICSpec…InitPacketNumber) -> protocol.PacketNumber(1)      ok … 12.544s
+packSpecInitial: hdr.PacketNumberLen = protocol.PacketNumberLen(n)  -> protocol.PacketNumberLen(1)   ok … 12.647s
+```
+
+Both are exactly the defect HR-5 exists to forbid — an engine's identity as a constant in library
+code — and both were invisible, while the SCID and DCID lengths already had engine-agnostic guards
+that loop over 3/5/12 and 8..20. `TestUTransportPinsWhateverFirstPacketNumberTheSpecAsks` closes it
+symmetrically: four dials, packet numbers 7/42/3/2 in fields of 1/2/3/4 bytes, each read back out of
+the long header on the wire. (Each case keeps the number inside the field it pins; a truncated packet
+number is a different and legitimate QUIC behaviour, not this pin.)
+
+### E3c/E26: "explicit caller wins" was a behaviour no test could see
+
+`dialSpec` carried `if t.ConnectionIDGenerator == nil && t.ConnectionIDLength == 0` with the
+documented intent that "the spec pins what the caller left open, it does not overwrite what the
+caller decided". A certifier removed the condition entirely and the whole root package stayed green
+(`ok … 12.909s`), which made it both unguarded (C1) and — since no Sightglass code sets either field
+(`grep -rn 'ConnectionIDLength\|ConnectionIDGenerator' go --include='*.go'` returns nothing) — an
+unreachable branch on the shipped path (C2).
+
+Trying to guard it showed the condition was hiding a real defect rather than expressing a policy.
+`Transport.init` runs under a `sync.Once` and caches ONE connection-ID generator for the life of the
+Transport, so the Source Connection ID length is decided at the FIRST dial. A second u-layer dial on
+that Transport with a different `SrcConnIDLength` was therefore served the first spec's length —
+silently, in clear text, in every long header. The condition made that silent in one more way: a
+caller that had pinned `Transport.ConnectionIDLength` itself got its value used while its profile
+declared another.
+
+Neither can be honoured after the fact, so neither is guessed at. After `init`, the dial now compares
+the generator's actual length with the spec's and **refuses** (HR-6):
+
+```
+quic u-layer: this Transport issues 3-byte source connection IDs and this dial's spec pins
+SrcConnIDLength 5; a Transport's connection-ID generator is fixed at its first dial, so one
+Transport cannot send both
+```
+
+Both halves are ablated separately (E3c makes the pre-`init` condition unconditional; E26 deletes the
+post-`init` check) and both go red. Nothing changes for Sightglass, which builds a fresh
+`quic.Transport` per session (`go/quich3/h3client.go:613`) and sets neither field — the check executes
+on the shipped path and its refusal branch does not, which the shipped-path coverage profile shows as
+`u_transport.go:91 … 1` and `u_transport.go:92 … 0`.
 
 ### E2b is here twice because the obvious mutation is inert
 
@@ -427,6 +525,10 @@ field and a call. It carries its own vacuity check: the same conn DOES get `SetR
 when a size is declared.
 
 ### Element with no guard
+
+**One element, and it is not code.** Every element of the u-layer itself has been turned red by a
+mutation on this machine, including the four that a certifier turned green against the previous
+revision of this table (E24 ii/iii, E5 ii, E6 ii, E3c/E26). The single exception:
 
 The **fhttp pin alignment** (§8) has no test that can go red, and that is not an oversight. Go's
 minimal-version selection means a consumer that requires a newer fhttp gets the newer one regardless
@@ -535,6 +637,27 @@ The fork's own new tests are NOT in this list, and one of them nearly was: see t
 for the assertion that was failing 1 run in 12 and what replaced it. After that change,
 `TestUTransportLaysTheInitialOutWithTheSpecsFrameBuilder` and
 `TestUTransportGeneratesAFreshDestConnIDEveryDial` ran 14/14 green.
+
+This round's tests were measured the same way, because two of them tighten a threshold and a third
+is statistical:
+
+```
+$ go test . -count=8 -run 'TestUTransportGeneratesAFreshDestConnIDEveryDial|
+                           TestUTransportDestConnIDIsUniformlyRandom|
+                           TestUTransportRefusesASpecThisTransportCannotHonour|
+                           TestUTransportPinsWhateverFirstPacketNumberTheSpecAsks'
+ok  github.com/Berserk-Automation-Hub/quic-go-utls  64.808s          # 8/8
+$ go test . ./internal/wire ./internal/handshake -count=2
+ok … 35.196s / 0.374s / 1.010s
+```
+
+One flake WAS found and fixed while doing it, and it is recorded rather than quietly repaired: the
+second subtest of `TestUTransportRefusesASpecThisTransportCannotHonour` originally dialled a dead
+localhost port and required `context.DeadlineExceeded` from the first dial. A datagram to a closed
+port draws an ICMP port-unreachable, which races the 300 ms deadline, so it failed once in eight. It
+now dials an unanswering sink socket and asserts the thing it actually needs — that `Transport.init`
+left the Transport issuing the first spec's 3-byte connection IDs — instead of inferring it from
+which error came back.
 
 ### 9.4 Known pre-existing failure under `-count=2`
 

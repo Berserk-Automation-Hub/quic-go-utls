@@ -258,6 +258,102 @@ func TestUTransportPinsWhateverSourceConnectionIDLengthTheSpecAsks(t *testing.T)
 	}
 }
 
+// TestUTransportPinsWhateverFirstPacketNumberTheSpecAsks is the engine-agnostic half of the two
+// packet-number pins (HR-5, HR-9), and it is here because the reverse attack worked without it.
+//
+// Every other test in this file drives the single pair (packet number 1, 1-byte field) — which is
+// what the browser this fork was written for happens to send. A certifier therefore replaced
+// `protocol.PacketNumber(t.QUICSpec.InitialPacketSpec.InitPacketNumber)` in dialSpec with
+// `protocol.PacketNumber(1)`, and `hdr.PacketNumberLen = protocol.PacketNumberLen(n)` in
+// u_packet_packer.go with `protocol.PacketNumberLen(1)`, and the suite stayed green in both cases:
+// an engine's identity burned into library code, invisible — exactly the defect HR-5 exists to
+// forbid, and the reason SCID and DCID lengths are already looped over (3/5/12 and 8..20).
+//
+// So this asks for numbers and field widths no browser profile here declares and reads both back out
+// of the long header on the wire. Each case keeps the number inside the field it pins, because a
+// truncated packet number is a different (and legitimate) QUIC behaviour, not this pin.
+func TestUTransportPinsWhateverFirstPacketNumberTheSpecAsks(t *testing.T) {
+	for _, tc := range []struct {
+		pn    uint64
+		pnLen int
+	}{
+		{pn: 7, pnLen: 1},
+		{pn: 42, pnLen: 2},
+		{pn: 3, pnLen: 3},
+		{pn: 2, pnLen: 4},
+	} {
+		t.Run(fmt.Sprintf("packet number %d in a %d-byte field", tc.pn, tc.pnLen), func(t *testing.T) {
+			spec := uTestSpec()
+			spec.InitialPacketSpec.InitPacketNumber = tc.pn
+			spec.InitialPacketSpec.InitPacketNumberLength = tc.pnLen
+			datagrams := uDialIntoTheVoid(t, spec, uTestQUICConfig())
+			extHdr, _ := uDecryptInitial(t, datagrams[0])
+			require.Equalf(t, protocol.PacketNumber(tc.pn), extHdr.PacketNumber,
+				"the spec asked for first Initial packet number %d and the wire carries %d", tc.pn, extHdr.PacketNumber)
+			require.Equalf(t, protocol.PacketNumberLen(tc.pnLen), extHdr.PacketNumberLen,
+				"the spec asked for a %d-byte packet-number field and the wire carries %d", tc.pnLen, extHdr.PacketNumberLen)
+		})
+	}
+}
+
+// TestUTransportRefusesASpecThisTransportCannotHonour: Transport.init caches ONE connection-ID
+// generator for the life of the Transport, so the Source Connection ID length is decided once and
+// every later dial on that Transport inherits it. A dial whose spec pins a different length cannot
+// be honoured — and must therefore be refused, not quietly served with the other length, which would
+// put an SCID length on the wire that this dial's profile never declared (HR-6).
+//
+// Both ways in are covered: a caller that pinned the Transport's own connection-ID fields (the case
+// the pre-init `if` in dialSpec deliberately does not overwrite), and two u-layer sessions sharing
+// one Transport — the cross-session leak in its connection-ID form.
+func TestUTransportRefusesASpecThisTransportCannotHonour(t *testing.T) {
+	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1}
+
+	t.Run("the caller pinned the Transport's own connection-ID length", func(t *testing.T) {
+		cli, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+		require.NoError(t, err)
+		defer cli.Close()
+		tr := &UTransport{Transport: &Transport{Conn: cli, ConnectionIDLength: 4}, QUICSpec: uTestSpec()}
+		defer tr.Close()
+		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		defer cancel()
+		_, err = tr.DialEarly(ctx, addr, uTestTLSConfig(), uTestQUICConfig())
+		require.EqualError(t, err, "quic u-layer: this Transport issues 4-byte source connection IDs and this dial's spec pins SrcConnIDLength 0; a Transport's connection-ID generator is fixed at its first dial, so one Transport cannot send both",
+			"the dial went ahead although the Transport pins a 4-byte source connection ID and the spec pins 0: one of those two is silently not what left the socket")
+	})
+
+	t.Run("a second session on the same Transport pins a different length", func(t *testing.T) {
+		// A real (unanswering) sink rather than a dead port: a datagram to a closed localhost port
+		// draws an ICMP port-unreachable, which races the deadline and makes the first dial's error
+		// unpredictable. What the first dial has to achieve here is only that Transport.init runs,
+		// which is asserted directly below rather than inferred from which error came back.
+		sink, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+		require.NoError(t, err)
+		defer sink.Close()
+		cli, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+		require.NoError(t, err)
+		defer cli.Close()
+		shared := &Transport{Conn: cli}
+		defer shared.Close()
+
+		specA := uTestSpec()
+		specA.InitialPacketSpec.SrcConnIDLength = 3
+		ctxA, cancelA := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		defer cancelA()
+		_, err = (&UTransport{Transport: shared, QUICSpec: specA}).DialEarly(ctxA, sink.LocalAddr(), uTestTLSConfig(), uTestQUICConfig())
+		require.Error(t, err, "the first dial was supposed to fail: nobody answers on the sink")
+		require.Equal(t, 3, shared.connIDGenerator.ConnectionIDLen(),
+			"the first dial did not leave this Transport issuing its own spec's 3-byte source connection IDs, so the second dial below would prove nothing")
+
+		specB := uTestSpec()
+		specB.InitialPacketSpec.SrcConnIDLength = 5
+		ctxB, cancelB := context.WithTimeout(context.Background(), 300*time.Millisecond)
+		defer cancelB()
+		_, err = (&UTransport{Transport: shared, QUICSpec: specB}).DialEarly(ctxB, addr, uTestTLSConfig(), uTestQUICConfig())
+		require.EqualError(t, err, "quic u-layer: this Transport issues 3-byte source connection IDs and this dial's spec pins SrcConnIDLength 5; a Transport's connection-ID generator is fixed at its first dial, so one Transport cannot send both",
+			"the second session was served the first session's source connection ID length instead of its own")
+	})
+}
+
 // TestUTransportSecondInitialKeepsUpstreamPacketNumberLength: the spec pins the FIRST Initial's
 // packet-number length only. Pinning every Initial would be its own tell — the capture shows the
 // second packet of the ClientHello flight using a 2-byte field.
@@ -430,16 +526,89 @@ func TestUTransportGeneratesAFreshDestConnIDEveryDial(t *testing.T) {
 		"%d dials produced only %d distinct Destination Connection ID(s) (%v): the first-flight DCID is not freshly random, so every connection from this host is linkable by its Initial header",
 		dials, len(uniq), seen)
 
-	// A DCID that varies but is not random — a counter, a timestamp — would pass the test above. The
-	// cheapest thing that is true of a random 8-byte value and false of those is that the three IDs
-	// share no byte position, which a counter fails in seven positions out of eight.
+	// A DCID that varies but is not random — a counter, a timestamp — would pass the test above, so
+	// the three IDs are also required to share almost no byte position. The tolerance is ONE, not
+	// five: three uniform 8-byte values share a given position with probability 2^-16, so "two or
+	// more shared" has probability 28·2^-32 ≈ 6·10^-9 and cannot flake, while a big-endian nanosecond
+	// timestamp shares its top FOUR positions between dials a second apart and a counter shares
+	// seven. (An earlier revision required only `shared < 6` and a certifier walked a timestamp
+	// straight through it.) Entropy itself is measured where it can be sampled four thousand times:
+	// TestUTransportDestConnIDIsUniformlyRandom.
 	shared := 0
 	for i := range uTestDCIDLen {
 		if seen[0][2*i:2*i+2] == seen[1][2*i:2*i+2] && seen[1][2*i:2*i+2] == seen[2][2*i:2*i+2] {
 			shared++
 		}
 	}
-	require.Lessf(t, shared, uTestDCIDLen-2, "%d of %d byte positions are identical across all three Destination Connection IDs (%v): the DCID is structured, not random", shared, uTestDCIDLen, seen)
+	require.LessOrEqualf(t, shared, 1, "%d of %d byte positions are identical across all three Destination Connection IDs (%v): the DCID is structured, not random", shared, uTestDCIDLen, seen)
+}
+
+// TestUTransportDestConnIDIsUniformlyRandom is the entropy half of the DCID guard, and it exists
+// because three dials cannot measure randomness — only change.
+//
+// The wire test above proves the DCID that leaves the socket is fresh on every dial. It cannot prove
+// it is RANDOM, and an earlier revision that tried (by tolerating five of eight identical byte
+// positions) was defeated exactly as the documentation claimed it could not be: a certifier replaced
+// protocol.GenerateConnectionID(l) with a big-endian time.Now().UnixNano() — no crypto/rand anywhere
+// — and the suite stayed green, because three dials a second apart differ in their low bytes. A
+// timestamp DCID is as linkable as a constant one: monotone, predictable, and it puts the host clock
+// in clear text in every Initial header.
+//
+// This drives the SAME function the dial drives — (*UTransport).uGenerateDestConnID, called by
+// uDoDial <- dialSpec <- DialEarly, which is what go/quich3/h3client.go:646 calls — and asks of its
+// output the two properties true of uniform bytes and false of every structured generator: every
+// byte position takes nearly all 256 values, and every bit is set about half the time.
+//
+// What it CANNOT detect, stated rather than glossed over: a keyed PRF (AES of a counter, say) is
+// uniform by construction and would pass, and no statistical test can tell one from randomness
+// without the key. What it excludes is the family a real mistake produces — constants, counters,
+// timestamps, host prefixes, truncated or biased randomness.
+func TestUTransportDestConnIDIsUniformlyRandom(t *testing.T) {
+	const samples = 4096
+	tr := &UTransport{Transport: &Transport{}, QUICSpec: uTestSpec()}
+
+	values := make([]map[byte]struct{}, uTestDCIDLen)
+	for i := range values {
+		values[i] = make(map[byte]struct{}, 256)
+	}
+	bitsSet := make([]int, 8*uTestDCIDLen)
+	distinct := make(map[protocol.ConnectionID]struct{}, samples)
+	for range samples {
+		id, err := tr.uGenerateDestConnID()
+		require.NoError(t, err)
+		require.Equal(t, uTestDCIDLen, id.Len())
+		distinct[id] = struct{}{}
+		for i, b := range id.Bytes() {
+			values[i][b] = struct{}{}
+			for bit := range 8 {
+				if b&(1<<bit) != 0 {
+					bitsSet[8*i+bit]++
+				}
+			}
+		}
+	}
+	// The per-position checks come first on purpose: they are the ones that NAME the defect. A
+	// timestamp or a counter also repeats itself within 4096 calls, but "only 1 of 256 values at byte
+	// 0" says what is wrong, where "3712 distinct instead of 4096" merely differs.
+	//
+	// A byte position misses a given value in 4096 uniform draws with probability (255/256)^4096 =
+	// 1.1e-7, so all 256 are expected and requiring 250 is unflakeable slack. A constant position
+	// scores 1; a big-endian nanosecond timestamp scores 1 in its top four positions; a counter
+	// scores 1 in seven of eight.
+	const minValues = 250
+	for i, v := range values {
+		require.GreaterOrEqualf(t, len(v), minValues,
+			"byte %d of the Destination Connection ID took only %d of 256 possible values in %d generations: that position is not random, so every Initial this host sends carries a stable pattern any observer on the path can link",
+			i, len(v), samples)
+	}
+	// A uniform bit is set samples/2 ± 32 (1σ). 40%..60% is twelve standard deviations out.
+	for i, n := range bitsSet {
+		require.Truef(t, n > samples*2/5 && n < samples*3/5,
+			"bit %d of the Destination Connection ID was set in %d of %d generations (%.1f%%); a uniform bit is set half the time, so this one carries structure",
+			i, n, samples, 100*float64(n)/float64(samples))
+	}
+	require.Equalf(t, samples, len(distinct),
+		"%d generations produced only %d distinct Destination Connection IDs: the generator repeats itself", samples, len(distinct))
 }
 
 // uVarintAt is a small reader used by the transport-parameter assertions below.
