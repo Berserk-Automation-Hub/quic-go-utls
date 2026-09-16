@@ -23,11 +23,11 @@ go      1.24.1 -> 1.27.0
 
 ## 1. What the patch is, exactly
 
-### 1.1 Files ADDED (16)
+### 1.1 Files ADDED (17)
 
-`git diff --name-status 4e6a465 HEAD | awk '{print $1}' | sort | uniq -c` -> `16 A / 2 D / 365 M`.
-An earlier revision of this section said 17 and then enumerated 16; the count below is the
-enumeration.
+`git diff --name-status 4e6a465 HEAD | awk '{print $1}' | sort | uniq -c` -> `17 A / 2 D / 365 M`.
+An earlier revision of this section said 17 while enumerating 16; the count below is the
+enumeration, and it is 17 because round 3 added a seventh test file (`u_packet_packer_test.go`).
 
 Source (8):
 
@@ -42,14 +42,15 @@ Source (8):
 | `internal/handshake/u_crypto_setup.go` | `NewUCryptoSetupClient` — `tls.UQUICClient(...)` + `ApplyPreset(spec)`; the `tlsQUICConn` interface and the `*tls.UQUICConn` adapter. |
 | `internal/wire/u_transport_parameters.go` | `TransportParameters.PopulateFromUQUIC` — derives quic-go's local flow-control view from the utls transport-parameter extension, so we police exactly what we advertised. |
 
-Tests (6) — the fork's own tests for the fork's own code (see §3):
+Tests (7) — the fork's own tests for the fork's own code (see §3):
 
 `u_transport_test.go`, `u_quic_frames_test.go`, `u_quic_spec_test.go`, `u_conn_buffers_test.go`,
-`internal/handshake/u_crypto_setup_test.go`, `internal/wire/u_transport_parameters_test.go`.
+`u_packet_packer_test.go`, `internal/handshake/u_crypto_setup_test.go`,
+`internal/wire/u_transport_parameters_test.go`.
 
 Other (2): `PATCHES.md` (this file) and `integrationtests/self/self_curveid_test.go` (§2).
 
-8 + 6 + 2 = 16.
+8 + 7 + 2 = 17.
 
 ### 1.2 Files DELETED (2)
 
@@ -213,7 +214,10 @@ differ in whether `earlyConnChan` is armed, which `select` arm returns the conne
 
 The tests assert the u-layer's properties **on the wire**: they capture the datagrams a real
 `UTransport.DialEarly` puts on a UDP socket and decrypt them with the RFC 9001 §5.2 Initial keys any
-on-path observer can derive, rather than reading back our own configuration. One test completes a
+on-path observer can derive, rather than reading back our own configuration. One exception, and it is
+declared rather than hidden: `u_packet_packer_test.go` drives the packer directly through upstream's
+mock harness, because the state it guards — the connection asking for an ACK-only packet while
+Initial CRYPTO is pending — cannot be reached from a dial on demand (§7 E29). One test completes a
 full handshake against a stock quic-go server and moves 1 MB of stream data over it. **No value in
 any of these tests is a captured browser fingerprint (HR-1) and none is claimed to be one**: the
 specs are synthetic, deliberately unlike any browser, and what they prove is the MECHANISM — that
@@ -358,7 +362,7 @@ comparable. Packet timing (pacing, ACK cadence, PMTU probing, retransmit timing)
 
 ## 7. Ablation record
 
-"A guard I have not broken is not a guard." Each of the **32** elements below was reverted **on its
+"A guard I have not broken is not a guard." Each of the **35** elements below was reverted **on its
 own**, the named test was run, and the exact failure text recorded. All were then restored
 (`git status --short` clean of every ablation file afterwards).
 
@@ -371,6 +375,10 @@ Three things about this table that were not true of the one it replaces:
   condition (E3c/E26). Each has its own section below. Nothing in this table is claimed to be
   guarded that has not been turned red on this machine, and the one element that still has no guard
   is named as such.
+* **Three more were found the same way, by us, after fixing those** — because the lesson of the
+  first four is that the mutations nobody tried are where the unguarded elements are (E27, E28,
+  E29). One of them, E28, needed TWO attempts: the obvious assertion (frame counts) passed under the
+  mutation and only the PADDING did not. See "Three elements we found by attacking our own table".
 
 * **Every dial-path ablation drives `UTransport.DialEarly`**, the only entry point this fork has and
   the only one `go/quich3/h3client.go:646` calls. The previous table ablated `UTransport.Dial`
@@ -415,6 +423,9 @@ Three things about this table that were not true of the one it replaces:
 | E24 | `uGenerateDestConnID` returns something that is not random, three mutations: (i) a CONSTANT of the right length (`bytes.Repeat([]byte{0xAB}, l)`); (ii) a big-endian `time.Now().UnixNano()` — no `crypto/rand` anywhere; (iii) `crypto/rand` with the first FIVE of eight bytes forced to `0x11` | `TestUTransportGeneratesAFreshDestConnIDEveryDial` (all three) and `TestUTransportDestConnIDIsUniformlyRandom` (ii, iii) | (i) `3 dials produced only 1 distinct Destination Connection ID(s) ([abababababababab abababababababab abababababababab]): the first-flight DCID is not freshly random, so every connection from this host is linkable by its Initial header`; (ii) `4 of 8 byte positions are identical across all three Destination Connection IDs ([18d5f0725764c500 18d5f07299183e28 18d5f072dad4ac48]): the DCID is structured, not random` and `byte 0 of the Destination Connection ID took only 1 of 256 possible values in 4096 generations: that position is not random, so every Initial this host sends carries a stable pattern any observer on the path can link`; (iii) `5 of 8 byte positions are identical across all three Destination Connection IDs ([111111111126465d 1111111111fdf313 1111111111d35efb]): the DCID is structured, not random` and the same byte-0 failure |
 | E25 | `uDialsEarly` -> `false` (the u-layer stops attempting 0-RTT) | `quich3.TestQUICResumptionHelloMatchesChromeQJA4` (Sightglass, shipped path) | `warm q-JA4 = q13d0313h3_55b375c5d22e_b0954bf1abdf, want q13d0314h3_55b375c5d22e_79cc91d6b50c` — the warm ClientHello loses `early_data` (0x002a) and emits a q-JA4 no Chrome emits |
 | E26 | drop the post-`init` check that the Transport's connection-ID generator agrees with the spec's `SrcConnIDLength` | both subtests of `TestUTransportRefusesASpecThisTransportCannotHonour` | `expected: "quic u-layer: this Transport issues 3-byte source connection IDs and this dial's spec pins SrcConnIDLength 5; a Transport's connection-ID generator is fixed at its first dial, so one Transport cannot send both" / actual: "context deadline exceeded"` — `the second session was served the first session's source connection ID length instead of its own` |
+| E27 | `uGenerateDestConnID`'s "the profile declares no length" branch: `generateConnectionIDForInitial()` -> `protocol.GenerateConnectionID(8)`, a CONSTANT length inside the legal range | `TestUSpecDestConnIDLengthZeroKeepsTheUpstreamRandomLength` | `a spec declaring no DestConnIDLength produced only 1 distinct length(s) in 512 dials (map[8:512]): upstream draws the first-flight DCID length uniformly from [8,20], and a client that always picks one of them is telling on itself in the length field` |
+| E28 | the frame builder's reserve in the packer: `reserve := protocol.ByteCount(fb.MaxOverhead())` -> `0` | `TestUTransportKeepsTheSpecLayoutWhenTheClientHelloFillsThePacket` | `the saturated Initial carries no PADDING at all (2 CRYPTO frame(s), 1 PING(s)): the packer reserved nothing for the frame builder, so the layout the spec declares — 2..6 PADDING runs — could not be applied and upstream's shape went out instead` |
+| E29 | `useSpecInitial`'s `!onlyAck`: the spec layout runs even when the connection asked for an ACK-only packet | `TestUPacketPackerLeavesAnAckOnlyInitialToUpstream` | `the ACK-only Initial carries 3 frame(s): the connection asked for an ACK and the spec layout sent the pending ClientHello instead, in a window the congestion controller had closed` |
 
 ### E24 is here because the reverse attack worked TWICE
 
@@ -524,11 +535,54 @@ is hidden, which is the branch where the early return is the only thing between 
 field and a call. It carries its own vacuity check: the same conn DOES get `SetReadBuffer(1<<20)`
 when a size is declared.
 
+### Three elements we found by attacking our own table
+
+After fixing what the certifier broke, the same method was turned on the rest of the u-layer:
+mutations nobody had tried, one at a time, restored after each. Three more elements were green.
+
+**E27 — "the profile declares no DCID length" was only checked for a legal RANGE.**
+`TestUSpecDestConnIDLengthZeroKeepsTheUpstreamRandomLength` generated ONE connection ID and asserted
+`8 <= len <= 20`, which any constant in that range satisfies. But upstream's behaviour is not "a
+length in [8,20]", it is a length drawn uniformly from that range on every dial, and a client that
+always picks 8 is distinguishable from stock quic-go by the length field alone. 512 generations, ten
+of the thirteen lengths required (a given one is missed with probability (12/13)^512 = 10^-18).
+
+**E28 — the packer's reserve, and the assertion that was not sharp enough.**
+`packSpecInitialPacket` subtracts `fb.MaxOverhead()` before asking upstream for a payload, so the
+frame builder has room for the extra frame headers a split costs and for a PING. Every wire test used
+a small synthetic ClientHello with hundreds of spare bytes, where the reserve is slack: setting it to
+`0` left the whole suite green. Under saturation — a ClientHello too big for one Initial, which is
+what the browser this parrots actually sends — it is load-bearing. The first attempt at a guard was
+still not enough, and that is worth recording: asserting "more than one CRYPTO frame and at least one
+PING" on the saturated Initial ALSO passed under the mutation, because the initial crypto stream
+splits the hello itself and a one-byte rounding gap admits a single PING. Measured, with and without:
+
+```
+reserve = fb.MaxOverhead()    crypto=5 pings=2 padding=65 runs=3
+reserve = 0                   crypto=2 pings=1 padding=0  runs=0
+```
+
+PADDING is what separates them, and it is also what the spec actually declares (2..6 runs), so that
+is what the test asserts.
+
+**E29 — `!onlyAck`, which no dial can reach on demand.**
+When the congestion controller will not let anything ack-eliciting out, the connection asks the
+packer for an ACK-ONLY packet. If the spec path ran there it would send the pending ClientHello
+instead — a full-size, ack-eliciting datagram in a window the controller had closed. Removing
+`!onlyAck` left every wire test green, because a real dial only reaches the packer in the state a
+real dial produces. This one is therefore guarded at the packer, not on the wire:
+`u_packet_packer_test.go` drives `uPacketPacker.PackCoalescedPacket` — the method the connection
+calls — through upstream's own mock harness (`newTestPacketPacker`), with a real ClientHello queued
+on the initial stream, and requires the ACK-only packet to carry no frames. It ships with a positive
+control in the same file (`onlyAck=false`, same state, the spec layout DOES run and fills the packet
+to exactly `Config.InitialPacketSize`), so the assertion cannot pass by the packer doing nothing.
+
 ### Element with no guard
 
 **One element, and it is not code.** Every element of the u-layer itself has been turned red by a
-mutation on this machine, including the four that a certifier turned green against the previous
-revision of this table (E24 ii/iii, E5 ii, E6 ii, E3c/E26). The single exception:
+mutation on this machine: the four a certifier turned green against the previous revision of this
+table (E24 ii/iii, E5 ii, E6 ii, E3c/E26) and the three we then found ourselves (E27, E28, E29). The
+single exception:
 
 The **fhttp pin alignment** (§8) has no test that can go red, and that is not an oversight. Go's
 minimal-version selection means a consumer that requires a newer fhttp gets the newer one regardless
@@ -650,6 +704,10 @@ ok  github.com/Berserk-Automation-Hub/quic-go-utls  64.808s          # 8/8
 $ go test . ./internal/wire ./internal/handshake -count=2
 ok … 35.196s / 0.374s / 1.010s
 ```
+
+Round 3's later additions were measured too — `TestUTransportKeepsTheSpecLayoutWhenTheClientHelloFillsThePacket`
+4/4 with `-count=4`, and the whole root package plus `./internal/wire ./internal/handshake` green
+under `-count=2` (35.4s / 0.6s / 1.0s) after they landed.
 
 One flake WAS found and fixed while doing it, and it is recorded rather than quietly repaired: the
 second subtest of `TestUTransportRefusesASpecThisTransportCannotHonour` originally dialled a dead

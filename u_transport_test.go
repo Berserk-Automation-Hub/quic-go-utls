@@ -240,6 +240,53 @@ func TestUTransportLaysTheInitialOutWithTheSpecsFrameBuilder(t *testing.T) {
 	// neither in an Initial.
 }
 
+// TestUTransportKeepsTheSpecLayoutWhenTheClientHelloFillsThePacket: the browser this parrots sends a
+// ClientHello that does not fit in one Initial — the oracle pcap shows a two-packet flight — and the
+// packer must lay BOTH out with the spec's frame builder, not fall back to one CRYPTO frame when the
+// packet is full.
+//
+// This is the guard for the `reserve` the packer subtracts before it asks upstream for a payload
+// (`reserve := protocol.ByteCount(fb.MaxOverhead())`). Every other test in this file uses a small
+// synthetic ClientHello that leaves hundreds of spare bytes, so the reserve is slack there and
+// deleting it changes nothing: with `reserve = 0` the whole suite stayed green. Under saturation it
+// is load-bearing — upstream fills the packet to the last byte, the builder then has no room for the
+// extra frame headers a split costs or for a single PING, and the Initial silently reverts to
+// upstream's one-CRYPTO-frame shape, which is exactly the tell the frame builder exists to remove.
+func TestUTransportKeepsTheSpecLayoutWhenTheClientHelloFillsThePacket(t *testing.T) {
+	spec := uTestSpec()
+	chs := uTestClientHelloSpec()
+	// One large extension, so the hello needs more than one Initial. The value is nothing but
+	// filler: no browser is being reproduced here (HR-1), the size is the whole point.
+	chs.Extensions = append(chs.Extensions, &tls.GenericExtension{Id: 0x4444, Data: make([]byte, 1400)})
+	spec.ClientHelloSpec = chs
+
+	datagrams := uDialIntoTheVoid(t, spec, uTestQUICConfig())
+	require.GreaterOrEqualf(t, len(datagrams), 2,
+		"a %d-byte ClientHello produced %d datagram(s); it was supposed to need at least two Initials", 1400, len(datagrams))
+	for i, dg := range datagrams {
+		require.Equalf(t, uTestDatagramSize, len(dg),
+			"datagram %d is %d bytes, the spec pins every Initial datagram to %d even when the ClientHello fills it", i, len(dg), uTestDatagramSize)
+	}
+	// The FIRST Initial is the saturated one — upstream fills it to the last byte and the tail of the
+	// hello goes in the next. Measured, with the reserve and without it:
+	//
+	//	reserve = fb.MaxOverhead()   crypto=5 pings=2 padding=65 runs=3
+	//	reserve = 0                  crypto=2 pings=1 padding=0  runs=0
+	//
+	// so the frame COUNT alone does not separate them (the initial crypto stream splits the hello
+	// itself, so two frames appear either way, which is why a count-only assertion let `reserve = 0`
+	// through). PADDING does: with nothing reserved there is not one spare byte for it, and the
+	// spec's declared MinPADDING..MaxPADDING runs silently become none.
+	_, payload := uDecryptInitial(t, datagrams[0])
+	pf := parseInitialPayload(t, payload)
+	require.Positivef(t, pf.padding,
+		"the saturated Initial carries no PADDING at all (%d CRYPTO frame(s), %d PING(s)): the packer reserved nothing for the frame builder, so the layout the spec declares — %d..%d PADDING runs — could not be applied and upstream's shape went out instead",
+		len(pf.crypto), pf.pings, 2, 6)
+	require.GreaterOrEqualf(t, len(pf.crypto), 3,
+		"the saturated Initial carries %d CRYPTO frame(s); the spec's frame builder declares a minimum of 3, and there was no room to split", len(pf.crypto))
+	require.Positivef(t, pf.pings, "the saturated Initial carries no PING frame: there was no room left for the spec's layout")
+}
+
 // TestUTransportPinsWhateverSourceConnectionIDLengthTheSpecAsks is the engine-agnostic half of the
 // SCID guard (HR-9): the length is the PROFILE's, not a constant. Zero is the length Chrome happens
 // to use, and it is also what upstream produces once zero-length connection IDs are allowed — so a

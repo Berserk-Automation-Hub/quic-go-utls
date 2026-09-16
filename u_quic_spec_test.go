@@ -49,12 +49,29 @@ func TestUSpecExplicitTokenStoreWins(t *testing.T) {
 
 // TestUSpecDestConnIDLengthZeroKeepsTheUpstreamRandomLength: 0 means "the profile declares none", so
 // the upstream behaviour stands rather than a length this package invented.
+//
+// Upstream's behaviour is not merely "a length in [8,20]" — it is a length drawn uniformly from that
+// range on every dial, and a client that always picks the same one is distinguishable from stock
+// quic-go by the length field alone. A single sample cannot tell the two apart (any constant in the
+// range passes), so this draws 512 and requires most of the range to appear: replacing
+// generateConnectionIDForInitial() with protocol.GenerateConnectionID(8) — a constant of a legal
+// length — is the mutation this exists to catch, and it scores 1.
 func TestUSpecDestConnIDLengthZeroKeepsTheUpstreamRandomLength(t *testing.T) {
+	const samples = 512
 	tr := &UTransport{Transport: &Transport{}, QUICSpec: &QUICSpec{}}
-	id, err := tr.uGenerateDestConnID()
-	require.NoError(t, err)
-	require.GreaterOrEqual(t, id.Len(), int(protocol.MinConnectionIDLenInitial))
-	require.LessOrEqual(t, id.Len(), protocol.MaxConnIDLen)
+	lengths := map[int]int{}
+	for range samples {
+		id, err := tr.uGenerateDestConnID()
+		require.NoError(t, err)
+		require.GreaterOrEqual(t, id.Len(), int(protocol.MinConnectionIDLenInitial))
+		require.LessOrEqual(t, id.Len(), protocol.MaxConnIDLen)
+		lengths[id.Len()]++
+	}
+	// 13 lengths are possible (8..20); in 512 uniform draws a given one is missed with probability
+	// (12/13)^512 = 1e-18, so requiring 10 of 13 cannot flake.
+	require.GreaterOrEqualf(t, len(lengths), 10,
+		"a spec declaring no DestConnIDLength produced only %d distinct length(s) in %d dials (%v): upstream draws the first-flight DCID length uniformly from [8,20], and a client that always picks one of them is telling on itself in the length field",
+		len(lengths), samples, lengths)
 }
 
 // TestUSpecDestConnIDLengthIsHonoured: any length the profile declares is the length generated.
