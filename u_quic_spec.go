@@ -22,9 +22,6 @@ import (
 	tls "github.com/Berserk-Automation-Hub/utls"
 )
 
-// DefaultUDPDatagramMinSize is the RFC 9000 §14.1 minimum for a datagram carrying an Initial.
-const DefaultUDPDatagramMinSize = 1200
-
 // QUICSpec is a full client-side QUIC parrot: the Initial-packet shape plus the TLS ClientHello.
 type QUICSpec struct {
 	// InitialPacketSpec pins the QUIC Initial packet (header fields + frame layout).
@@ -35,13 +32,14 @@ type QUICSpec struct {
 	// wire AND what this connection's local flow control is configured from (see
 	// wire.TransportParameters.PopulateFromUQUIC).
 	ClientHelloSpec *tls.ClientHelloSpec
-
-	// UDPDatagramMinSize is the minimum UDP payload size of a datagram carrying an Initial packet.
-	// Initial datagrams built through the spec's FrameBuilder are padded to EXACTLY the connection's
-	// max packet size (Config.InitialPacketSize), so this is only the floor used when no
-	// FrameBuilder is set. 0 means DefaultUDPDatagramMinSize.
-	UDPDatagramMinSize int
 }
+
+// There is deliberately no UDPDatagramMinSize here. This spec used to carry one, and nothing in this
+// package ever read it: an Initial datagram laid out by the FrameBuilder is padded to EXACTLY
+// Config.InitialPacketSize, and an Initial packed by upstream code is padded by upstream's own
+// initialPaddingLen to the same size. A caller setting it therefore believed it was pinning the
+// datagram size while the value went nowhere. It is gone rather than documented, because a profile
+// field the library silently ignores is worse than no field at all.
 
 // InitialPacketSpec pins the observable fields of the client's Initial packets.
 type InitialPacketSpec struct {

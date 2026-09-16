@@ -41,11 +41,18 @@ func (t *UTransport) dialSpec(ctx context.Context, addr net.Addr, host string, t
 		return nil, errors.New("quic u-layer: QUICSpec.ClientHelloSpec is nil")
 	}
 	// The Source Connection ID length is a spec property, so it must be pinned before Transport.init
-	// caches a generator (Chrome sends a zero-length SCID, which upstream never picks by default).
-	if t.ConnectionIDGenerator == nil {
-		t.ConnectionIDGenerator = &protocol.DefaultConnectionIDGenerator{ConnLen: t.QUICSpec.InitialPacketSpec.SrcConnIDLength}
+	// caches its generator. Both halves below are load-bearing and neither can stand without the
+	// other: the length itself, and the permission to use a ZERO length — which is what a browser
+	// sends and what upstream refuses to pick, substituting protocol.DefaultConnectionIDLength (4)
+	// unless allowZeroLengthConnIDs says otherwise. A spec-driven client owns its socket outright,
+	// so it does not need a non-empty connection ID to demultiplex on.
+	//
+	// An explicit ConnectionIDGenerator or ConnectionIDLength on the Transport wins: the spec pins
+	// what the caller left open, it does not overwrite what the caller decided.
+	if t.ConnectionIDGenerator == nil && t.ConnectionIDLength == 0 {
+		t.ConnectionIDLength = t.QUICSpec.InitialPacketSpec.SrcConnIDLength
 	}
-	if err := t.init(true); err != nil { // allowZeroLengthConnIDs: a spec'd client owns its socket
+	if err := t.init(true); err != nil {
 		return nil, err
 	}
 	if err := validateConfig(conf); err != nil {

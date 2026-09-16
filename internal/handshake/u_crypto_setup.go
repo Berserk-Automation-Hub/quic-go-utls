@@ -60,8 +60,9 @@ func NewUCryptoSetupClient(
 ) (CryptoSetup, error) {
 	cs := newCryptoSetup(connID, tp, rttStats, qlogger, logger, protocol.PerspectiveClient, version)
 
+	// The caller's Config is never mutated: the u-layer writes a TLS-version floor onto it below, and
+	// so does utls' ApplyPreset.
 	tlsConf = tlsConf.Clone()
-	tlsConf.MinVersion = tls.VersionTLS13
 	cs.tlsConf = tlsConf
 	cs.allow0RTT = enable0RTT
 
@@ -73,6 +74,17 @@ func NewUCryptoSetupClient(
 	if err := uc.ApplyPreset(chs); err != nil {
 		return nil, err
 	}
+	// RFC 9001 §4.2: QUIC uses TLS 1.3 and nothing else, whatever the ClientHello spec's
+	// supported_versions list happens to contain. This has to be set AFTER ApplyPreset, not before:
+	// ApplyPreset -> UConn.SetTLSVers writes a MinVersion DERIVED FROM THE SPEC onto the very Config
+	// installed above (utls u_conn.go), so a spec that also lists TLS 1.2 — a perfectly ordinary thing
+	// for a browser profile to carry — silently lowers the LOCAL policy and UQUICConn.Start then
+	// refuses the connection with "tls: Config MinVersion must be at least TLS 1.13" before a single
+	// byte reaches the wire. Setting it first, as this did, is a no-op that ApplyPreset overwrites.
+	//
+	// Nothing observable changes: the ClientHello bytes, supported_versions included, come from the
+	// spec either way. Only the local floor moves, and QUIC has no other legal value for it.
+	tlsConf.MinVersion = tls.VersionTLS13
 	cs.conn = uQUICConn{uc}
 	// NOTE: no SetTransportParameters here. The spec's *tls.QUICTransportParametersExtension already
 	// carries the exact bytes utls will write into extension 0x39; if utls asks anyway (the

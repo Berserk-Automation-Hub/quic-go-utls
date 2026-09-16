@@ -1,0 +1,586 @@
+package quic
+
+// [SIGHTGLASS U-LAYER] Tests for the spec-driven dial (u_transport.go, u_connection.go,
+// u_packet_packer.go, internal/handshake/u_crypto_setup.go, internal/wire/u_transport_parameters.go).
+//
+// The u-layer exists to pin the passively observable properties of the client's Initial flight, so
+// its tests assert those properties ON THE WIRE: the datagrams are captured off a UDP socket and
+// decrypted with the RFC 9001 §5.2 Initial keys anybody who sees the Destination Connection ID can
+// derive. Nothing here reads back our own configuration.
+//
+// THE SPEC IN THIS FILE IS SYNTHETIC AND IS NOT A BROWSER (HR-1). No value below is a captured
+// fingerprint, and none is claimed to be one: the browser's values live in a Sightglass profile
+// document, and this fork must never contain an engine identity (HR-5). What these tests assert is
+// the MECHANISM — that whatever a spec pins is what leaves the socket — which is precisely the thing
+// a profile-level test cannot prove on its own.
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"io"
+	"net"
+	"testing"
+	"time"
+
+	tls "github.com/Berserk-Automation-Hub/utls"
+
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/handshake"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/protocol"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/testdata"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/internal/wire"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/qlog"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/qlogwriter"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/quicvarint"
+	"github.com/Berserk-Automation-Hub/quic-go-utls/testutils/events"
+	"github.com/stretchr/testify/require"
+)
+
+// uTestSpecValues are the synthetic pins this file drives through the u-layer and then looks for on
+// the wire. They are deliberately values upstream quic-go would never pick by itself, so finding
+// them in a datagram proves the spec drove the packet rather than the library's own defaults:
+// upstream picks a random DCID length in [8,20], a 4-byte SCID, packet number 0, and a
+// packet-number field of 2 or 4 bytes — never 1.
+const (
+	uTestDCIDLen      = 8
+	uTestSCIDLen      = 0
+	uTestFirstPN      = 1
+	uTestFirstPNLen   = 1
+	uTestDatagramSize = 1250
+)
+
+func uTestClientHelloSpec() *tls.ClientHelloSpec {
+	return &tls.ClientHelloSpec{
+		CipherSuites: []uint16{
+			tls.TLS_AES_128_GCM_SHA256,
+			tls.TLS_AES_256_GCM_SHA384,
+			tls.TLS_CHACHA20_POLY1305_SHA256,
+		},
+		CompressionMethods: []byte{0},
+		Extensions: []tls.TLSExtension{
+			&tls.SNIExtension{},
+			&tls.SupportedCurvesExtension{Curves: []tls.CurveID{tls.X25519}},
+			&tls.SupportedVersionsExtension{Versions: []uint16{tls.VersionTLS13}},
+			&tls.SignatureAlgorithmsExtension{SupportedSignatureAlgorithms: []tls.SignatureScheme{
+				tls.ECDSAWithP256AndSHA256,
+				tls.PSSWithSHA256,
+				tls.PKCS1WithSHA256,
+			}},
+			&tls.KeyShareExtension{KeyShares: []tls.KeyShare{{Group: tls.X25519}}},
+			&tls.PSKKeyExchangeModesExtension{Modes: []uint8{tls.PskModeDHE}},
+			&tls.ALPNExtension{AlpnProtocols: []string{uTestALPN}},
+			&tls.QUICTransportParametersExtension{TransportParameters: tls.TransportParameters{
+				tls.MaxIdleTimeout(30000),
+				tls.MaxUDPPayloadSize(1472),
+				tls.InitialMaxData(15728640),
+				tls.InitialMaxStreamDataBidiLocal(6291456),
+				tls.InitialMaxStreamDataBidiRemote(6291456),
+				tls.InitialMaxStreamDataUni(6291456),
+				tls.InitialMaxStreamsBidi(100),
+				tls.InitialMaxStreamsUni(103),
+				tls.InitialSourceConnectionID{},
+			}},
+		},
+	}
+}
+
+func uTestSpec() *QUICSpec {
+	return &QUICSpec{
+		ClientHelloSpec: uTestClientHelloSpec(),
+		InitialPacketSpec: InitialPacketSpec{
+			SrcConnIDLength:        uTestSCIDLen,
+			DestConnIDLength:       uTestDCIDLen,
+			InitPacketNumber:       uTestFirstPN,
+			InitPacketNumberLength: uTestFirstPNLen,
+			FrameBuilder:           &QUICRandomFrames{MinPING: 1, MaxPING: 3, MinCRYPTO: 3, MaxCRYPTO: 8, MinPADDING: 2, MaxPADDING: 6},
+		},
+	}
+}
+
+const uTestALPN = "u-layer-test"
+
+func uTestTLSConfig() *tls.Config {
+	return &tls.Config{ServerName: "u-layer.invalid", NextProtos: []string{uTestALPN}, InsecureSkipVerify: true}
+}
+
+func uTestQUICConfig() *Config {
+	return &Config{
+		InitialPacketSize:    uTestDatagramSize,
+		HandshakeIdleTimeout: 300 * time.Millisecond,
+		MaxIdleTimeout:       300 * time.Millisecond,
+	}
+}
+
+// uDialIntoTheVoid dials a UDP address nobody answers on and returns every datagram the dial put on
+// the wire. The handshake can never complete, which is exactly what is wanted: the client's Initial
+// flight is the whole subject.
+func uDialIntoTheVoid(t *testing.T, spec *QUICSpec, conf *Config) [][]byte {
+	t.Helper()
+	sink, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	require.NoError(t, err)
+	defer sink.Close()
+	cli, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	require.NoError(t, err)
+	defer cli.Close()
+
+	tr := &UTransport{Transport: &Transport{Conn: cli}, QUICSpec: spec}
+	defer tr.Close()
+
+	dialErr := make(chan error, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
+		defer cancel()
+		_, err := tr.Dial(ctx, sink.LocalAddr(), uTestTLSConfig(), conf)
+		dialErr <- err
+	}()
+
+	var datagrams [][]byte
+	require.NoError(t, sink.SetReadDeadline(time.Now().Add(1100*time.Millisecond)))
+	for {
+		buf := make([]byte, 2048)
+		n, _, err := sink.ReadFrom(buf)
+		if err != nil {
+			break
+		}
+		datagrams = append(datagrams, buf[:n])
+		if len(datagrams) >= 4 {
+			break
+		}
+	}
+	<-done
+	// A dial that emits nothing has usually loud-failed inside the packer, and that error is the
+	// interesting one — reporting only "no datagrams" would hide it.
+	require.NotEmptyf(t, datagrams, "the dial put nothing on the wire; it failed with: %v", <-dialErr)
+	return datagrams
+}
+
+// uDecryptInitial removes header protection and decrypts one client Initial packet with the keys
+// RFC 9001 §5.2 derives from the Destination Connection ID — i.e. exactly what any on-path observer
+// can do, which is why the Initial's frame layout is a fingerprint at all.
+func uDecryptInitial(t *testing.T, datagram []byte) (*wire.ExtendedHeader, []byte) {
+	t.Helper()
+	hdr, pdata, _, err := wire.ParsePacket(datagram)
+	require.NoError(t, err)
+	require.Equal(t, protocol.PacketTypeInitial, hdr.Type, "the first packet in the datagram is not an Initial")
+	_, opener := handshake.NewInitialAEAD(hdr.DestConnectionID, protocol.PerspectiveServer, hdr.Version)
+	data := append([]byte(nil), pdata...)
+	extHdr, err := unpackLongHeader(opener, hdr, data)
+	require.NoError(t, err)
+	extHdrLen := extHdr.ParsedLen()
+	payload, err := opener.Open(data[extHdrLen:extHdrLen], data[extHdrLen:], extHdr.PacketNumber, data[:extHdrLen])
+	require.NoError(t, err)
+	return extHdr, payload
+}
+
+// TestUTransportPinsTheInitialPacketShapeOnTheWire is the u-layer's end-to-end guard: every property
+// the spec pins is read back out of the bytes that left the socket.
+func TestUTransportPinsTheInitialPacketShapeOnTheWire(t *testing.T) {
+	datagrams := uDialIntoTheVoid(t, uTestSpec(), uTestQUICConfig())
+
+	for i, dg := range datagrams {
+		require.Equalf(t, uTestDatagramSize, len(dg),
+			"datagram %d is %d bytes, the spec pins every Initial datagram to %d", i, len(dg), uTestDatagramSize)
+	}
+
+	extHdr, payload := uDecryptInitial(t, datagrams[0])
+	require.Equalf(t, uTestDCIDLen, extHdr.DestConnectionID.Len(),
+		"Destination Connection ID is %d bytes, the spec pins %d (upstream picks a random length in [8,20])",
+		extHdr.DestConnectionID.Len(), uTestDCIDLen)
+	require.Equalf(t, uTestSCIDLen, extHdr.SrcConnectionID.Len(),
+		"Source Connection ID is %d bytes, the spec pins %d (upstream defaults to 4)",
+		extHdr.SrcConnectionID.Len(), uTestSCIDLen)
+	require.Equalf(t, protocol.PacketNumber(uTestFirstPN), extHdr.PacketNumber,
+		"first Initial packet number is %d, the spec pins %d (upstream always starts at 0)",
+		extHdr.PacketNumber, uTestFirstPN)
+	require.Equalf(t, protocol.PacketNumberLen(uTestFirstPNLen), extHdr.PacketNumberLen,
+		"first Initial packet-number field is %d bytes, the spec pins %d (upstream emits only 2 or 4)",
+		extHdr.PacketNumberLen, uTestFirstPNLen)
+	require.Zerof(t, len(extHdr.Token), "the Initial carries a %d byte token; the spec asks for none", len(extHdr.Token))
+
+	pf := parseInitialPayload(t, payload)
+	// The CRYPTO bytes really are a ClientHello (handshake type 0x01), reassembled from offset 0.
+	first := pf.crypto[0]
+	for _, c := range pf.crypto {
+		if c.Offset < first.Offset {
+			first = c
+		}
+	}
+	require.Zerof(t, first.Offset, "the lowest CRYPTO offset in the first Initial is %d, want 0", first.Offset)
+	require.Equalf(t, byte(0x01), first.Data[0], "the CRYPTO stream does not start with a TLS ClientHello (handshake type 0x%02x)", first.Data[0])
+}
+
+// TestUTransportLaysTheInitialOutWithTheSpecsFrameBuilder is the guard for the frame LAYOUT, kept
+// apart from the header pins above so that a packer that has fallen back to upstream framing is
+// reported as such rather than as whichever header field happens to be asserted first.
+//
+// Upstream quic-go emits exactly ONE CRYPTO frame followed by a run of trailing PADDING. The
+// browser this parrots interleaves several out-of-order CRYPTO fragments with PING and PADDING.
+func TestUTransportLaysTheInitialOutWithTheSpecsFrameBuilder(t *testing.T) {
+	datagrams := uDialIntoTheVoid(t, uTestSpec(), uTestQUICConfig())
+	_, payload := uDecryptInitial(t, datagrams[0])
+	pf := parseInitialPayload(t, payload)
+
+	require.Greaterf(t, len(pf.crypto), 1,
+		"the Initial carries %d CRYPTO frame(s): that is upstream quic-go's one-CRYPTO-plus-trailing-PADDING layout, not the spec's", len(pf.crypto))
+	require.Positivef(t, pf.pings,
+		"the Initial carries no PING frames: the spec's frame builder did not lay this packet out")
+	require.Greaterf(t, pf.runs, 1,
+		"the Initial's PADDING is in %d run(s): upstream pads once, at the end; the spec interleaves", pf.runs)
+	require.Positive(t, pf.padding, "the Initial carries no PADDING")
+}
+
+// TestUTransportPinsWhateverSourceConnectionIDLengthTheSpecAsks is the engine-agnostic half of the
+// SCID guard (HR-9): the length is the PROFILE's, not a constant. Zero is the length Chrome happens
+// to use, and it is also what upstream produces once zero-length connection IDs are allowed — so a
+// test that only ever asks for zero cannot tell the pin from the permission. This one asks for a
+// length upstream would never pick and looks for it in the long header.
+func TestUTransportPinsWhateverSourceConnectionIDLengthTheSpecAsks(t *testing.T) {
+	for _, l := range []int{3, 5, 12} {
+		t.Run(fmt.Sprintf("%d-byte SCID", l), func(t *testing.T) {
+			spec := uTestSpec()
+			spec.InitialPacketSpec.SrcConnIDLength = l
+			datagrams := uDialIntoTheVoid(t, spec, uTestQUICConfig())
+			extHdr, _ := uDecryptInitial(t, datagrams[0])
+			require.Equalf(t, l, extHdr.SrcConnectionID.Len(),
+				"the spec asked for a %d byte source connection ID and the wire carries %d", l, extHdr.SrcConnectionID.Len())
+		})
+	}
+}
+
+// TestUTransportSecondInitialKeepsUpstreamPacketNumberLength: the spec pins the FIRST Initial's
+// packet-number length only. Pinning every Initial would be its own tell — the capture shows the
+// second packet of the ClientHello flight using a 2-byte field.
+func TestUTransportSecondInitialKeepsUpstreamPacketNumberLength(t *testing.T) {
+	datagrams := uDialIntoTheVoid(t, uTestSpec(), uTestQUICConfig())
+	if len(datagrams) < 2 {
+		t.Skipf("the dial only produced %d datagram(s); this synthetic ClientHello fits in one Initial and the retransmission never arrived within the deadline", len(datagrams))
+	}
+	extHdr, _ := uDecryptInitial(t, datagrams[1])
+	if extHdr.PacketNumber == uTestFirstPN {
+		t.Skipf("datagram 2 is a retransmission of packet number %d, not a second packet", extHdr.PacketNumber)
+	}
+	require.NotEqualf(t, protocol.PacketNumberLen(uTestFirstPNLen), extHdr.PacketNumberLen,
+		"the second Initial also uses a %d-byte packet-number field; the spec pins only the first", uTestFirstPNLen)
+}
+
+// TestUTransportLocalFlowControlComesFromTheSpec is the guard for
+// wire.TransportParameters.PopulateFromUQUIC, wired in u_connection.go.
+//
+// utls marshals the quic_transport_parameters extension straight out of the ClientHello spec, so the
+// values on the WIRE are the spec's no matter what quic-go believes. What PopulateFromUQUIC fixes is
+// the other half: quic-go's OWN view of what it advertised, which is what its flow controllers
+// police and what its idle timer uses. If the two disagree the connection grants the peer a window
+// the peer never saw, or kills the connection for exceeding a limit the peer was never told about —
+// and neither shows up in the ClientHello bytes.
+//
+// It reads that local view out of the qlog parameters_set event quic-go emits for its own
+// parameters, which is the only place the library states it.
+func TestUTransportLocalFlowControlComesFromTheSpec(t *testing.T) {
+	var rec events.Recorder
+	conf := uTestQUICConfig()
+	conf.Tracer = func(context.Context, bool, ConnectionID) qlogwriter.Trace { return &events.Trace{Recorder: &rec} }
+	// Config values deliberately DIFFERENT from the spec's, so a local view built from the Config
+	// instead of from the spec is visible rather than coincidentally equal.
+	conf.InitialStreamReceiveWindow = 1 << 17
+	conf.InitialConnectionReceiveWindow = 1 << 18
+	conf.MaxIdleTimeout = 7 * time.Second
+
+	uDialIntoTheVoid(t, uTestSpec(), conf)
+
+	var local *qlog.ParametersSet
+	for _, ev := range rec.Events(qlog.ParametersSet{}) {
+		ps, ok := ev.(qlog.ParametersSet)
+		if ok && ps.Initiator == qlog.InitiatorLocal {
+			local = &ps
+			break
+		}
+	}
+	require.NotNil(t, local, "the connection never recorded its own transport parameters")
+
+	require.Equalf(t, protocol.ByteCount(15728640), local.InitialMaxData,
+		"quic-go believes it advertised initial_max_data %d; the ClientHello spec says 15728640", local.InitialMaxData)
+	require.Equalf(t, protocol.ByteCount(6291456), local.InitialMaxStreamDataBidiLocal,
+		"quic-go believes it advertised initial_max_stream_data_bidi_local %d; the ClientHello spec says 6291456", local.InitialMaxStreamDataBidiLocal)
+	require.Equal(t, protocol.ByteCount(6291456), local.InitialMaxStreamDataBidiRemote)
+	require.Equal(t, protocol.ByteCount(6291456), local.InitialMaxStreamDataUni)
+	require.Equal(t, int64(100), local.InitialMaxStreamsBidi)
+	require.Equal(t, int64(103), local.InitialMaxStreamsUni)
+	require.Equalf(t, 30*time.Second, local.MaxIdleTimeout,
+		"quic-go believes it advertised max_idle_timeout %s; the ClientHello spec says 30s", local.MaxIdleTimeout)
+	require.Equalf(t, protocol.ByteCount(1472), local.MaxUDPPayloadSize,
+		"quic-go believes it advertised max_udp_payload_size %d; the ClientHello spec says 1472", local.MaxUDPPayloadSize)
+}
+
+// TestUTransportRejectsAnIncompleteSpec: HR-6. A dial without the pins that define the identity must
+// fail loudly rather than fall through to upstream quic-go's shape, which would put a
+// quic-go-shaped Initial on the wire under a browser's name.
+func TestUTransportRejectsAnIncompleteSpec(t *testing.T) {
+	cli, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	require.NoError(t, err)
+	defer cli.Close()
+	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1}
+
+	for _, tc := range []struct {
+		name string
+		spec *QUICSpec
+		want string
+	}{
+		{"no spec at all", nil, "quic u-layer: UTransport.QUICSpec is nil"},
+		{"no ClientHello spec", &QUICSpec{}, "quic u-layer: QUICSpec.ClientHelloSpec is nil"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			tr := &UTransport{Transport: &Transport{Conn: cli}, QUICSpec: tc.spec}
+			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
+			defer cancel()
+			_, err := tr.Dial(ctx, addr, uTestTLSConfig(), uTestQUICConfig())
+			require.EqualError(t, err, tc.want)
+		})
+	}
+}
+
+// TestUTransportRejectsAnUndiallableDestConnIDLength: RFC 9000 §7.2 requires the client's first
+// Destination Connection ID to be at least 8 bytes. A spec that asks for less must be refused, not
+// silently rounded up to something the profile never declared.
+func TestUTransportRejectsAnUndiallableDestConnIDLength(t *testing.T) {
+	cli, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	require.NoError(t, err)
+	defer cli.Close()
+
+	spec := uTestSpec()
+	spec.InitialPacketSpec.DestConnIDLength = int(protocol.MinConnectionIDLenInitial) - 1
+	tr := &UTransport{Transport: &Transport{Conn: cli}, QUICSpec: spec}
+	defer tr.Close()
+	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+	defer cancel()
+	_, err = tr.Dial(ctx, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1}, uTestTLSConfig(), uTestQUICConfig())
+	require.EqualError(t, err, "quic u-layer: DestConnIDLength below the RFC 9000 minimum of 8")
+}
+
+// TestUTransportDoesNotECNMarkWhatItSends: upstream quic-go runs RFC 9000 §13.4.2 ECN validation and
+// stamps ECT(0) into the IP header of its one-RTT datagrams. Chrome never marks. The u-layer's
+// connection passes a false `enableECN` to the sent-packet handler, so the send side must report
+// ECNUnsupported for every packet while the RECEIVE side is left intact.
+func TestUTransportDoesNotECNMarkWhatItSends(t *testing.T) {
+	require.False(t, uSendsECNMarks,
+		"uSendsECNMarks is true: every one-RTT datagram would leave the host with IP TOS 0x02, which no Chrome ever sends")
+}
+
+// uVarintAt is a small reader used by the transport-parameter assertions below.
+func uVarintAt(t *testing.T, b []byte, i int) (uint64, int) {
+	t.Helper()
+	v, n, err := quicvarint.Parse(b[i:])
+	require.NoError(t, err)
+	return v, n
+}
+
+// TestUTransportAdvertisesTheSpecsTransportParameters: quic-go's local flow control must be derived
+// from the SAME transport parameters utls puts on the wire, or the connection would police limits it
+// never advertised. This drives the real dial and then re-reads the parameter block out of the
+// ClientHello bytes that left the socket.
+func TestUTransportAdvertisesTheSpecsTransportParameters(t *testing.T) {
+	spec := uTestSpec()
+	datagrams := uDialIntoTheVoid(t, spec, uTestQUICConfig())
+
+	// Reassemble the CRYPTO stream across every Initial that was sent.
+	stream := map[uint64]byte{}
+	maxOff := uint64(0)
+	for _, dg := range datagrams {
+		_, payload := uDecryptInitial(t, dg)
+		for _, c := range parseInitialPayload(t, payload).crypto {
+			for i, b := range c.Data {
+				stream[c.Offset+uint64(i)] = b
+				if c.Offset+uint64(i)+1 > maxOff {
+					maxOff = c.Offset + uint64(i) + 1
+				}
+			}
+		}
+	}
+	ch := make([]byte, maxOff)
+	for i := range ch {
+		b, ok := stream[uint64(i)]
+		if !ok {
+			ch = ch[:i]
+			break
+		}
+		ch[i] = b
+	}
+
+	// The quic_transport_parameters extension (0x0039) body, found by scanning the ClientHello for
+	// the codepoint followed by a plausible length. The body is a sequence of (id, len, value)
+	// varint triples (RFC 9000 §18).
+	want := map[uint64]uint64{
+		0x01: 30000,    // max_idle_timeout
+		0x03: 1472,     // max_udp_payload_size
+		0x04: 15728640, // initial_max_data
+		0x05: 6291456,  // initial_max_stream_data_bidi_local
+		0x06: 6291456,  // initial_max_stream_data_bidi_remote
+		0x07: 6291456,  // initial_max_stream_data_uni
+		0x08: 100,      // initial_max_streams_bidi
+		0x09: 103,      // initial_max_streams_uni
+	}
+	found := map[uint64]uint64{}
+	for i := 0; i+4 < len(ch); i++ {
+		if ch[i] != 0x00 || ch[i+1] != 0x39 {
+			continue
+		}
+		bodyLen := int(ch[i+2])<<8 | int(ch[i+3])
+		if bodyLen == 0 || i+4+bodyLen > len(ch) {
+			continue
+		}
+		body := ch[i+4 : i+4+bodyLen]
+		ok := true
+		for j := 0; j < len(body); {
+			id, n := uVarintAt(t, body, j)
+			j += n
+			if j >= len(body) {
+				ok = false
+				break
+			}
+			l, n := uVarintAt(t, body, j)
+			j += n
+			if j+int(l) > len(body) {
+				ok = false
+				break
+			}
+			if _, interesting := want[id]; interesting && l > 0 {
+				v, _ := uVarintAt(t, body, j)
+				found[id] = v
+			}
+			j += int(l)
+		}
+		if ok && len(found) > 0 {
+			break
+		}
+		found = map[uint64]uint64{}
+	}
+	require.Equal(t, want, found,
+		"the quic_transport_parameters extension on the wire does not carry the spec's values")
+}
+
+// TestUTransportLoudFailsWithoutTransportParameters: a ClientHello spec with no
+// quic_transport_parameters extension cannot produce a usable QUIC connection, so the u-layer must
+// say so rather than dial something the peer will reject for reasons nobody can trace.
+func TestUTransportLoudFailsWithoutTransportParameters(t *testing.T) {
+	chs := uTestClientHelloSpec()
+	var kept []tls.TLSExtension
+	for _, e := range chs.Extensions {
+		if _, isTP := e.(*tls.QUICTransportParametersExtension); !isTP {
+			kept = append(kept, e)
+		}
+	}
+	require.Less(t, len(kept), len(chs.Extensions), "the test spec had no transport parameters to remove")
+	chs.Extensions = kept
+
+	_, err := uQUICTransportParameters(chs)
+	require.Error(t, err)
+	require.EqualError(t, err, "ClientHelloSpec has no *tls.QUICTransportParametersExtension (extension 0x0039)")
+	var nilErr *net.AddrError
+	require.False(t, errors.As(err, &nilErr))
+}
+
+// TestUTransportCompletesARealHandshake is the u-layer's whole-path guard: a spec-driven dial has to
+// produce a WORKING QUIC connection, not just a well-shaped first datagram. It exercises every
+// element at once — the spec-driven crypto setup (the ClientHello utls built from the preset is the
+// one the server accepts), the transport parameters taken from the spec (a mismatch between what we
+// advertised and what we police shows up here and nowhere else), the u packer for the Initial flight
+// and upstream's packer for everything after it, and the zero-length source connection ID, which
+// upstream's Transport refuses unless the u-layer asks it to allow one.
+func TestUTransportCompletesARealHandshake(t *testing.T) {
+	serverConf := testdata.GetTLSConfig()
+	serverConf.NextProtos = []string{uTestALPN}
+	serverSock, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	require.NoError(t, err)
+	defer serverSock.Close()
+	ln, err := Listen(serverSock, serverConf, &Config{})
+	require.NoError(t, err)
+	defer ln.Close()
+
+	cli, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	require.NoError(t, err)
+	defer cli.Close()
+	tr := &UTransport{Transport: &Transport{Conn: cli}, QUICSpec: uTestSpec()}
+	defer tr.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	accepted := make(chan *Conn, 1)
+	go func() {
+		c, err := ln.Accept(ctx)
+		if err != nil {
+			return
+		}
+		accepted <- c
+	}()
+
+	clientConf := &tls.Config{ServerName: "localhost", RootCAs: testdata.GetRootCA(), NextProtos: []string{uTestALPN}}
+	conf := uTestQUICConfig()
+	conf.HandshakeIdleTimeout = 8 * time.Second
+	conf.MaxIdleTimeout = 8 * time.Second
+	conn, err := tr.Dial(ctx, serverSock.LocalAddr(), clientConf, conf)
+	require.NoError(t, err, "a spec-driven dial could not complete a handshake against a stock quic-go server")
+	defer conn.CloseWithError(0, "")
+
+	require.Equalf(t, uTestALPN, conn.ConnectionState().TLS.NegotiatedProtocol,
+		"the handshake completed but negotiated %q", conn.ConnectionState().TLS.NegotiatedProtocol)
+
+	var srv *Conn
+	select {
+	case srv = <-accepted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the server never accepted the connection")
+	}
+	defer srv.CloseWithError(0, "")
+
+	// ECN: the u-layer connection must report ECNUnsupported for its own outgoing packets, because
+	// Chrome never marks. This reads the wiring (the enableECN the sent-packet handler was built
+	// with), not the constant that feeds it.
+	require.Equalf(t, protocol.ECNUnsupported, conn.sentPacketHandler.ECNMode(true),
+		"the connection ECN-marks its 1-RTT packets; every datagram would leave the host with IP TOS 0x02")
+	require.Equal(t, protocol.ECNUnsupported, conn.sentPacketHandler.ECNMode(false))
+
+	// Data really flows, and MORE of it than quic-go's own default stream window allows. This is the
+	// flow-control half of the u-layer: utls writes the SPEC's transport parameters onto the wire, so
+	// the server may send up to the spec's initial_max_stream_data (6291456) immediately. If quic-go's
+	// local view were built from Config defaults (512 kB) instead of from the spec, the client would
+	// police a limit it never advertised and kill the connection with a FLOW_CONTROL_ERROR.
+	const payload = 1 << 20
+	require.Greater(t, payload, protocol.DefaultInitialMaxStreamData,
+		"the test payload fits in quic-go's default stream window, so it cannot detect a local/advertised mismatch")
+
+	str, err := conn.OpenStreamSync(ctx)
+	require.NoError(t, err)
+	_, err = str.Write([]byte("u-layer"))
+	require.NoError(t, err)
+	require.NoError(t, str.Close())
+
+	srvDone := make(chan error, 1)
+	go func() {
+		srvStr, err := srv.AcceptStream(ctx)
+		if err != nil {
+			srvDone <- err
+			return
+		}
+		got, err := io.ReadAll(srvStr)
+		if err != nil {
+			srvDone <- err
+			return
+		}
+		if string(got) != "u-layer" {
+			srvDone <- errors.New("the stream data did not survive the spec-driven connection")
+			return
+		}
+		if _, err := srvStr.Write(make([]byte, payload)); err != nil {
+			srvDone <- err
+			return
+		}
+		srvDone <- srvStr.Close()
+	}()
+
+	back, err := io.ReadAll(str)
+	require.NoError(t, err, "reading %d bytes back failed: quic-go policed a flow-control limit the ClientHello never advertised", payload)
+	require.Len(t, back, payload)
+	require.NoError(t, <-srvDone)
+}
