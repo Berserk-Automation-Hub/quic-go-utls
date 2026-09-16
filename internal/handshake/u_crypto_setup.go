@@ -20,7 +20,8 @@ import (
 )
 
 // tlsQUICConn is the subset of *tls.QUICConn that cryptoSetup uses. *tls.UQUICConn now implements
-// all of it, including StoreSession (see the vendored utls patch 2/4, third_party/utls/u_quic.go).
+// all of it, including StoreSession (see patch 2/4 in the utls fork, u_quic.go —
+// github.com/Berserk-Automation-Hub/utls on the "sightglass" branch).
 type tlsQUICConn interface {
 	Start(context.Context) error
 	NextEvent() tls.QUICEvent
@@ -41,7 +42,7 @@ var _ tlsQUICConn = (*tls.QUICConn)(nil)
 // fire and a spec-driven QUIC client could never persist a resumption ticket — it dialled COLD
 // forever, emitting Chrome's cold q-JA4 on every connection while genuine Chrome emits the
 // resumption one (q13d0314h3_55b375c5d22e_79cc91d6b50c) as soon as it has a ticket for the origin.
-// Both halves are now vendored patches in third_party/utls (1/4 and 2/4), so the adapter simply
+// Both halves are now patches in the utls fork (1/4 and 2/4), so the adapter simply
 // forwards and the whole upstream 0-RTT path in crypto_setup.go (QUICStoreSession ->
 // marshalDataForSessionState, QUICResumeSession -> handleDataFromSessionState) becomes reachable.
 type uQUICConn struct{ *tls.UQUICConn }

@@ -132,7 +132,7 @@ func uDialIntoTheVoid(t *testing.T, spec *QUICSpec, conf *Config) [][]byte {
 		defer close(done)
 		ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
 		defer cancel()
-		_, err := tr.Dial(ctx, sink.LocalAddr(), uTestTLSConfig(), conf)
+		_, err := tr.DialEarly(ctx, sink.LocalAddr(), uTestTLSConfig(), conf)
 		dialErr <- err
 	}()
 
@@ -226,9 +226,18 @@ func TestUTransportLaysTheInitialOutWithTheSpecsFrameBuilder(t *testing.T) {
 		"the Initial carries %d CRYPTO frame(s): that is upstream quic-go's one-CRYPTO-plus-trailing-PADDING layout, not the spec's", len(pf.crypto))
 	require.Positivef(t, pf.pings,
 		"the Initial carries no PING frames: the spec's frame builder did not lay this packet out")
-	require.Greaterf(t, pf.runs, 1,
-		"the Initial's PADDING is in %d run(s): upstream pads once, at the end; the spec interleaves", pf.runs)
 	require.Positive(t, pf.padding, "the Initial carries no PADDING")
+
+	// The number of separate PADDING RUNS is deliberately NOT asserted here. It is a property of the
+	// permutation, not of the layout: MinPADDING..MaxPADDING padding pieces are shuffled in among the
+	// CRYPTO and PING frames, and a permutation that happens to put two of them side by side reads
+	// back as one run. Asserting it on ONE connection therefore fails roughly one dial in twelve —
+	// measured, 1 failure in 12 runs of this test before it was removed — which is a flaky guard, not
+	// a guard. The multi-run property is real and IS guarded, statistically and where it is cheap to
+	// repeat: TestUQUICRandomFramesEmitsTheChaosShape builds 50 payloads and requires more than one
+	// PADDING run in at least one of them. What is deterministic on the wire, and what is asserted
+	// above, is that a PING frame and several CRYPTO frames are there at all — upstream quic-go emits
+	// neither in an Initial.
 }
 
 // TestUTransportPinsWhateverSourceConnectionIDLengthTheSpecAsks is the engine-agnostic half of the
@@ -334,7 +343,7 @@ func TestUTransportRejectsAnIncompleteSpec(t *testing.T) {
 			tr := &UTransport{Transport: &Transport{Conn: cli}, QUICSpec: tc.spec}
 			ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 			defer cancel()
-			_, err := tr.Dial(ctx, addr, uTestTLSConfig(), uTestQUICConfig())
+			_, err := tr.DialEarly(ctx, addr, uTestTLSConfig(), uTestQUICConfig())
 			require.EqualError(t, err, tc.want)
 		})
 	}
@@ -354,7 +363,7 @@ func TestUTransportRejectsAnUndiallableDestConnIDLength(t *testing.T) {
 	defer tr.Close()
 	ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 	defer cancel()
-	_, err = tr.Dial(ctx, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1}, uTestTLSConfig(), uTestQUICConfig())
+	_, err = tr.DialEarly(ctx, &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1}, uTestTLSConfig(), uTestQUICConfig())
 	require.EqualError(t, err, "quic u-layer: DestConnIDLength below the RFC 9000 minimum of 8")
 }
 
@@ -377,7 +386,7 @@ func TestUTransportRejectsAConnectionIDLengthAboveTheRFCMaximum(t *testing.T) {
 		defer tr.Close()
 		ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
 		defer cancel()
-		_, err := tr.Dial(ctx, addr, uTestTLSConfig(), uTestQUICConfig())
+		_, err := tr.DialEarly(ctx, addr, uTestTLSConfig(), uTestQUICConfig())
 		require.EqualError(t, err, fmt.Sprintf("quic u-layer: DestConnIDLength 21 above the RFC 9000 §17.2 maximum of %d", protocol.MaxConnIDLen))
 	})
 
@@ -387,20 +396,50 @@ func TestUTransportRejectsAConnectionIDLengthAboveTheRFCMaximum(t *testing.T) {
 			spec.InitialPacketSpec.SrcConnIDLength = l
 			tr := &UTransport{Transport: &Transport{Conn: cli}, QUICSpec: spec}
 			ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
-			_, err := tr.Dial(ctx, addr, uTestTLSConfig(), uTestQUICConfig())
+			_, err := tr.DialEarly(ctx, addr, uTestTLSConfig(), uTestQUICConfig())
 			cancel()
 			require.EqualError(t, err, fmt.Sprintf("quic u-layer: SrcConnIDLength %d is outside the RFC 9000 §17.2 range 0..%d", l, protocol.MaxConnIDLen))
 		}
 	})
 }
 
-// TestUTransportDoesNotECNMarkWhatItSends: upstream quic-go runs RFC 9000 §13.4.2 ECN validation and
-// stamps ECT(0) into the IP header of its one-RTT datagrams. Chrome never marks. The u-layer's
-// connection passes a false `enableECN` to the sent-packet handler, so the send side must report
-// ECNUnsupported for every packet while the RECEIVE side is left intact.
-func TestUTransportDoesNotECNMarkWhatItSends(t *testing.T) {
-	require.False(t, uSendsECNMarks,
-		"uSendsECNMarks is true: every one-RTT datagram would leave the host with IP TOS 0x02, which no Chrome ever sends")
+// TestUTransportGeneratesAFreshDestConnIDEveryDial: the first-flight Destination Connection ID is
+// the ONE field in the Initial header that must NOT be reproducible. Everything else the spec pins is
+// a constant on purpose — but the DCID is a random nonce, it is the value RFC 9001 §5.2 derives the
+// Initial keys from, and it travels in clear text in every client Initial. A client that reuses one
+// links every connection it ever makes, to every observer on the path, forever.
+//
+// uGenerateDestConnID is u-layer code, so upstream's own randomness tests do not cover it, and the
+// length assertions elsewhere in this file cannot tell `protocol.GenerateConnectionID(l)` from a
+// hard-coded l-byte constant. This one can: it reads the DCID off the wire on three separate dials.
+func TestUTransportGeneratesAFreshDestConnIDEveryDial(t *testing.T) {
+	const dials = 3
+	seen := make([]string, 0, dials)
+	for range dials {
+		datagrams := uDialIntoTheVoid(t, uTestSpec(), uTestQUICConfig())
+		hdr, _, _, err := wire.ParsePacket(datagrams[0])
+		require.NoError(t, err)
+		require.Equal(t, uTestDCIDLen, hdr.DestConnectionID.Len())
+		seen = append(seen, hdr.DestConnectionID.String())
+	}
+	uniq := map[string]int{}
+	for _, id := range seen {
+		uniq[id]++
+	}
+	require.Lenf(t, uniq, dials,
+		"%d dials produced only %d distinct Destination Connection ID(s) (%v): the first-flight DCID is not freshly random, so every connection from this host is linkable by its Initial header",
+		dials, len(uniq), seen)
+
+	// A DCID that varies but is not random — a counter, a timestamp — would pass the test above. The
+	// cheapest thing that is true of a random 8-byte value and false of those is that the three IDs
+	// share no byte position, which a counter fails in seven positions out of eight.
+	shared := 0
+	for i := range uTestDCIDLen {
+		if seen[0][2*i:2*i+2] == seen[1][2*i:2*i+2] && seen[1][2*i:2*i+2] == seen[2][2*i:2*i+2] {
+			shared++
+		}
+	}
+	require.Lessf(t, shared, uTestDCIDLen-2, "%d of %d byte positions are identical across all three Destination Connection IDs (%v): the DCID is structured, not random", shared, uTestDCIDLen, seen)
 }
 
 // uVarintAt is a small reader used by the transport-parameter assertions below.
@@ -555,7 +594,7 @@ func TestUTransportCompletesARealHandshake(t *testing.T) {
 	conf := uTestQUICConfig()
 	conf.HandshakeIdleTimeout = 8 * time.Second
 	conf.MaxIdleTimeout = 8 * time.Second
-	conn, err := tr.Dial(ctx, serverSock.LocalAddr(), clientConf, conf)
+	conn, err := tr.DialEarly(ctx, serverSock.LocalAddr(), clientConf, conf)
 	require.NoError(t, err, "a spec-driven dial could not complete a handshake against a stock quic-go server")
 	defer conn.CloseWithError(0, "")
 

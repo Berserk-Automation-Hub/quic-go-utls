@@ -3,8 +3,8 @@ package quic
 // [SIGHTGLASS U-LAYER] Browser-parroting QUIC spec.
 //
 // This file (and the other u_*.go files in this package, plus internal/handshake/u_crypto_setup.go
-// and internal/wire/u_transport_parameters.go) are the ONLY additions this vendored fork makes to
-// upstream github.com/Berserk-Automation-Hub/quic-go-utls v1.0.9-utls. They let a caller pin every
+// and internal/wire/u_transport_parameters.go) are the ONLY additions this fork makes to upstream
+// github.com/bogdanfinn/quic-go-utls v1.0.10-utls (commit 4e6a465). They let a caller pin every
 // passively-observable property of the QUIC Initial flight to a captured browser:
 //
 //   - the TLS ClientHello bytes            (utls ClientHelloSpec, via UQUICClient+ApplyPreset)
@@ -14,7 +14,7 @@ package quic
 //   - the Initial frame layout (CRYPTO split/order + PING/PADDING interleave) and the exact
 //     UDP datagram size
 //
-// Everything else is upstream quic-go. See third_party/quic-go-utls/UQUIC_LAYER_PATCH.md.
+// Everything else is upstream quic-go. See PATCHES.md at the root of this fork.
 
 import (
 	"crypto/rand"

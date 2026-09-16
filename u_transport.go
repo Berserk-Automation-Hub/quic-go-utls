@@ -24,17 +24,28 @@ type UTransport struct {
 	QUICSpec *QUICSpec
 }
 
-// Dial dials a new connection to a remote host (not using 0-RTT).
-func (t *UTransport) Dial(ctx context.Context, addr net.Addr, tlsConf *tls.Config, conf *Config) (*Conn, error) {
-	return t.dialSpec(ctx, addr, "", tlsConf, conf, false)
-}
+// uDialsEarly is whether a spec-driven dial attempts 0-RTT. It is always true, and it is a named
+// constant rather than a parameter for two reasons.
+//
+// There is no non-early entry point. Upstream quic-go exposes Transport.Dial and Transport.DialEarly;
+// this file used to mirror both, but nothing ever called UTransport.Dial except this package's own
+// tests — the shipped caller is quich3.h3client -> UTransport.DialEarly, and a browser is never
+// "cold by policy": Chrome attempts 0-RTT whenever it holds a ticket for the origin. An exported
+// second entry point that only tests reach is dead code on the shipped path, so it is gone and the
+// use0RTT parameter it existed to vary went with it.
+//
+// It stays NAMED so the single-factor ablation is a one-token edit: flip it to false and the warm
+// half of Sightglass's TestQUICResumptionHelloMatchesChromeQJA4 must fail, because a client that
+// does not allow 0-RTT sends no early_data extension and emits the COLD q-JA4 on a warm origin.
+const uDialsEarly = true
 
-// DialEarly dials a new connection, attempting to use 0-RTT if possible.
+// DialEarly dials a new connection, attempting to use 0-RTT if possible. It is the u-layer's only
+// dial entry point; see uDialsEarly.
 func (t *UTransport) DialEarly(ctx context.Context, addr net.Addr, tlsConf *tls.Config, conf *Config) (*Conn, error) {
-	return t.dialSpec(ctx, addr, "", tlsConf, conf, true)
+	return t.dialSpec(ctx, addr, "", tlsConf, conf)
 }
 
-func (t *UTransport) dialSpec(ctx context.Context, addr net.Addr, host string, tlsConf *tls.Config, conf *Config, use0RTT bool) (*Conn, error) {
+func (t *UTransport) dialSpec(ctx context.Context, addr net.Addr, host string, tlsConf *tls.Config, conf *Config) (*Conn, error) {
 	if t.QUICSpec == nil {
 		return nil, errors.New("quic u-layer: UTransport.QUICSpec is nil")
 	}
@@ -76,7 +87,6 @@ func (t *UTransport) dialSpec(ctx context.Context, addr net.Addr, host string, t
 		conf,
 		protocol.PacketNumber(t.QUICSpec.InitialPacketSpec.InitPacketNumber),
 		false,
-		use0RTT,
 		conf.Versions[0],
 	)
 }
@@ -88,7 +98,6 @@ func (t *UTransport) uDoDial(
 	config *Config,
 	initialPacketNumber protocol.PacketNumber,
 	hasNegotiatedVersion bool,
-	use0RTT bool,
 	version protocol.Version,
 ) (*Conn, error) {
 	srcConnID, err := t.connIDGenerator.GenerateConnectionID()
@@ -128,7 +137,7 @@ func (t *UTransport) uDoDial(
 		config,
 		tlsConf,
 		initialPacketNumber,
-		use0RTT,
+		uDialsEarly,
 		hasNegotiatedVersion,
 		qlogTrace,
 		logger,
@@ -154,7 +163,7 @@ func (t *UTransport) uDoDial(
 	}()
 
 	var earlyConnChan <-chan struct{}
-	if use0RTT {
+	if uDialsEarly {
 		earlyConnChan = conn.earlyConnReady()
 	}
 
@@ -167,7 +176,7 @@ func (t *UTransport) uDoDial(
 		}
 		return nil, context.Cause(ctx)
 	case params := <-recreateChan:
-		return t.uDoDial(ctx, sendConn, tlsConf, config, params.nextPacketNumber, true, use0RTT, params.nextVersion)
+		return t.uDoDial(ctx, sendConn, tlsConf, config, params.nextPacketNumber, true, params.nextVersion)
 	case err := <-errChan:
 		return nil, err
 	case <-earlyConnChan:

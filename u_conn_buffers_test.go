@@ -170,3 +170,45 @@ func TestUTransportSocketBuffersZeroKeepsUpstreamBehaviour(t *testing.T) {
 	require.Equalf(t, protocol.DesiredReceiveBufferSize, rcv,
 		"a zero-valued Transport got SO_RCVBUF %d, upstream quic-go asks for %d", rcv, protocol.DesiredReceiveBufferSize)
 }
+
+// uNoSyscallConn hides *net.UDPConn's SyscallConn, so setReceiveBufferTo/setSendBufferTo take the
+// branch quic-go uses for a net.PacketConn it cannot inspect with getsockopt. That branch matters
+// here because it is the one where the `want < 0` early return is the ONLY thing standing between an
+// absent profile field and a setsockopt: on an inspectable socket upstream's "only ever raise"
+// comparison (`if size >= want { return nil }`) happens to swallow a negative target as well, so a
+// test that only ever reads SO_RCVBUF back cannot tell the tri-state apart from that accident.
+type uNoSyscallConn struct {
+	net.PacketConn
+
+	readCalls  []int
+	writeCalls []int
+}
+
+func (c *uNoSyscallConn) SetReadBuffer(n int) error { c.readCalls = append(c.readCalls, n); return nil }
+func (c *uNoSyscallConn) SetWriteBuffer(n int) error {
+	c.writeCalls = append(c.writeCalls, n)
+	return nil
+}
+
+// TestUTransportSocketBuffersAbsentIssuesNoSetsockoptAtAll: "the profile declares no socket buffer"
+// must mean NO setsockopt is issued, not "a setsockopt with something we made up". The tri-state
+// documented on Transport.UDesiredReceiveBufferSize promises exactly that, and this is what holds it
+// to it — see uNoSyscallConn for why the getsockopt-based test above cannot.
+func TestUTransportSocketBuffersAbsentIssuesNoSetsockoptAtAll(t *testing.T) {
+	c := &uNoSyscallConn{PacketConn: newUDPConn(t)}
+
+	require.NoError(t, setReceiveBufferTo(c, UDoNotSetSocketBuffer))
+	require.NoError(t, setSendBufferTo(c, UDoNotSetSocketBuffer))
+	require.Emptyf(t, c.readCalls,
+		"a profile declaring no receive buffer still issued SetReadBuffer%v: absence must leave the kernel default standing, and substituting a size nobody measured invents a fingerprint", c.readCalls)
+	require.Emptyf(t, c.writeCalls,
+		"a profile declaring no send buffer still issued SetWriteBuffer%v: absence must leave the kernel default standing", c.writeCalls)
+
+	// Vacuity check: this same conn DOES get the call when the profile declares a size, so the two
+	// assertions above are about the tri-state and not about a code path that never fires.
+	const declared = 1 << 20
+	require.NoError(t, setReceiveBufferTo(c, declared))
+	require.NoError(t, setSendBufferTo(c, declared))
+	require.Equalf(t, []int{declared}, c.readCalls, "this path never calls SetReadBuffer at all, so the absence assertion above is vacuous")
+	require.Equalf(t, []int{declared}, c.writeCalls, "this path never calls SetWriteBuffer at all, so the absence assertion above is vacuous")
+}
