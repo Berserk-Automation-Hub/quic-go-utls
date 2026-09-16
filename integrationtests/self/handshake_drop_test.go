@@ -7,9 +7,7 @@ import (
 	"io"
 	mrand "math/rand/v2"
 	"net"
-	"runtime"
 	"slices"
-	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -306,13 +304,16 @@ func TestHandshakeWithPacketLoss(t *testing.T) {
 								defer ln.Close()
 
 								conn := test.fn(t, ln, clientConn, clientConf, timeout, data)
-								if !strings.HasPrefix(runtime.Version(), "go1.24") {
-									curveID := getCurveID(conn.ConnectionState().TLS)
-									if conf.postQuantum {
-										require.Equal(t, tls.X25519MLKEM768, curveID)
-									} else {
-										require.Equal(t, tls.CurveP384, curveID)
-									}
+								// Unconditional: unlike crypto/tls, utls does not gate the negotiated
+								// CurveID on the Go toolchain version (see getCurveID).
+								curveID := getCurveID(t, conn.ConnectionState().TLS)
+								if conf.postQuantum {
+									require.Equalf(t, tls.X25519MLKEM768, curveID,
+										"the handshake negotiated key-exchange group 0x%04x, want X25519MLKEM768 (0x%04x)", uint16(curveID), uint16(tls.X25519MLKEM768))
+								} else {
+									require.Equalf(t, tls.CurveP384, curveID,
+										"the handshake negotiated key-exchange group 0x%04x, want CurveP384 (0x%04x) — the client config restricts CurvePreferences to it",
+										uint16(curveID), uint16(tls.CurveP384))
 								}
 
 								if pattern != dropPatternDropOneThirdOfPackets {
