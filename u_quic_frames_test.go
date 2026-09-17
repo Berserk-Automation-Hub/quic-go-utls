@@ -349,59 +349,91 @@ func splitFrames(t *testing.T, b []byte) []builtFrame {
 // CONSTANT shape, which is precisely the tell this file exists to remove. That is the same defect
 // class as E5/E6: a profile value quietly stops being read.
 //
-// So this drives TWO bound sets that share no value, and requires the emitted counts to track EACH.
-// A constant cannot satisfy both.
-//
-// WHY A RANGE ASSERTION IS NOT ENOUGH, and what replaced it. A pair of Min<=x<=Max assertions is
-// satisfied by every constant INSIDE the declared range, so it catches a builder that ignores the
-// spec entirely and misses one that reads only HALF of it. Three single-factor mutations, each
-// applied alone to the tag this fork last shipped, left the whole package green:
+// WHY A RANGE ASSERTION IS NOT ENOUGH. A pair of Min<=x<=Max assertions is satisfied by every
+// constant INSIDE the declared range, so it catches a builder that ignores the spec entirely and
+// misses one that reads only HALF of it. Five single-factor mutations, each applied ALONE to
+// u_quic_frames.go, have defeated earlier versions of this test:
 //
 //	randUint64(uint64(q.MinPADDING), uint64(q.MaxPADDING)) -> randUint64(uint64(q.MaxPADDING), uint64(q.MaxPADDING))  // MinPADDING unread
 //	randUint64(uint64(q.MinPADDING), uint64(q.MaxPADDING)) -> randUint64(uint64(q.MinPADDING), uint64(q.MinPADDING))  // MaxPADDING unread
 //	randUint64(uint64(q.MinPING), uint64(q.MaxPING))       -> randUint64(uint64(q.MinPING), uint64(q.MinPING))        // MaxPING unread
-//	  => ok  github.com/Berserk-Automation-Hub/quic-go-utls  ~21.3s each   (the WHOLE package)
+//	lo, hi := uint64(q.MinPADDING), uint64(q.MaxPADDING); if hi > lo+1 { lo, hi = lo+1, hi-1 }          // NEITHER PADDING end read
+//	mid := (uint64(q.MinPADDING) + uint64(q.MaxPADDING)) / 2; randUint64(mid, mid)                      // PADDING a constant mid-range
 //
-// The CRYPTO half was already immune, because it asserts the DISTRIBUTION (len(cryptoCounts) > 1)
-// rather than the range. PING and PADDING now assert their distributions too, in the strongest form
-// each frame type admits:
+// The last two are the subtle ones: the count still VARIES build to build (PADDING runs merge, see
+// below), so every "the distribution is not a single value" test passes, and neither declared
+// endpoint ever reaches the wire.
 //
-//   - PING frames never merge on the wire (one 0x01 byte each, counted individually), so the count
-//     is EXACT: across n builds the smallest must be exactly MinPING and the largest exactly MaxPING.
-//     Either pin makes one of those two equalities false with probability 1.
-//   - PADDING runs DO merge (see below), so the exact form is unavailable and the distribution is
-//     bounded from both sides instead: at least one build must carry MORE than MinPADDING runs
-//     (impossible when the count is pinned at Min, since runs <= frames emitted), and at least
-//     `minBuildsAtOrBelowMinPADDING` builds must carry no more than MinPADDING runs (which pinning
-//     at Max cannot produce often enough).
+// WHAT REPLACED IT, per frame type and in the strongest form that type admits HERE:
 //
-// Both PADDING thresholds are measured, not guessed. 400 independent trials of n=120 builds each,
-// on this machine, with the 2..9 bound set below:
+//   - CRYPTO frames carry their own length, so they are counted exactly. len(cryptoCounts) > 1 was
+//     already immune to a pin; the exact-endpoint form is asserted on the wire (u_transport_test.go).
+//   - PING frames never merge (one 0x01 byte each), so the count is EXACT: across n builds the
+//     smallest must be exactly MinPING and the largest exactly MaxPING. Every pin, sub-range and
+//     mid-pin above fails one of those two equalities with probability 1.
+//   - PADDING runs MERGE. The builder emits numPADDING separate PADDING frames and shuffles them in
+//     among the CRYPTO and PING frames; two that land side by side read back as ONE run, because a
+//     PADDING frame is a single zero byte and a reader cannot tell four of them in one frame from
+//     four one-byte frames. So runs <= frames emitted, always, and the exact form is only available
+//     when the SEPARATORS so outnumber the PADDING frames that an un-merged build is routine.
 //
-//	                       max PADDING runs seen in a trial   builds with runs <= MinPADDING
-//	real builder (2..9)    >= 7 in every trial                10..36  (min over 400 trials: 10)
-//	pinned at MinPADDING   2 in every trial (by construction)  120
-//	pinned at MaxPADDING   >= 8 in every trial                 0..2   (max over 400 trials: 2)
+// THE THIRD BOUND SET EXISTS FOR EXACTLY THAT. With few separators (set 2 below: 4..7 PINGs and
+// 6..12 CRYPTO frames against up to 9 PADDING frames) the ceiling is nearly unreachable and only the
+// weak distribution bounds are available. Set 3 inverts the ratio — 18..22 PINGs and 14..16 CRYPTO
+// frames against 2..4 PADDING frames — and there MaxPADDING runs un-merged is routine, so the
+// ceiling is asserted as an EQUALITY, which is what kills the sub-range and the mid-pin.
 //
-// so "> MinPADDING" separates the Min pin with no overlap at all, and ">= 4 builds at or below
-// MinPADDING" separates the Max pin by 2 against 10. Both histograms are logged on every run, so a
-// margin that starts to erode is visible in the test output rather than only when it flakes.
+// Measured on this machine with the builder in this tree, n=120 builds per trial, the mutations
+// emulated exactly (a pin at k is the degenerate range k..k, which is the same draw the mutated
+// randUint64 makes):
 //
-// ON THE PADDING LOWER BOUND. The builder emits numPADDING separate PADDING frames and then shuffles
-// them in among the CRYPTO and PING frames. Two PADDING frames that land side by side read back off
-// the wire as ONE run, because QUIC's PADDING frame is a single zero byte and a reader cannot tell
-// four of them in one frame from four one-byte frames. The per-build UPPER bound is therefore exact
-// (runs <= frames emitted <= MaxPADDING) while the lower bound is only reachable across builds.
+//	SET 2  CRYPTO 6..12  PING 4..7  PADDING 4..9      60 trials
+//	                       max PADDING runs in a trial   builds with runs <= MinPADDING
+//	  real builder         7..9  (reached 9 in 8/60)     43..69
+//	  pinned at MaxPADDING 8..9                           4..21
+//	  pinned at MinPADDING 4  (every trial)             120
+//	  mid-pin (6)          6  (every trial)              45..70
+//	  sub-range (5..8)     7..8                          36..64
+//
+//	SET 3  CRYPTO 14..16  PING 18..22  PADDING 2..4     200 trials
+//	                       max PADDING runs in a trial   builds with runs <= MinPADDING
+//	  real builder         4  in 200/200 trials          35..60
+//	  pinned at MaxPADDING 4  in 200/200 trials           0..8
+//	  pinned at MinPADDING 2  (every trial)             120
+//	  mid-pin / sub-range  3  (every trial)               9..25
+//
+// so on set 2 the at-or-below count separates the MaxPADDING pin (43 against 21, thresholded at 30,
+// ~4.7 sigma either side) and NOTHING separates the mid-pin or the sub-range — their populations sit
+// on top of the real one. On set 3 "maxRuns == MaxPADDING" separates the MinPADDING pin, the mid-pin
+// and the sub-range with no overlap at all (4 against 2, 3, 3), and the at-or-below count separates
+// the MaxPADDING pin (35 against 8, thresholded at 20, ~5 sigma either side). Every histogram is
+// logged on every run, so a margin that starts to erode is visible in the test output rather than
+// only when it flakes.
+//
+// NOTE ON SET 2's BOUNDS. They are MinPADDING 4, MaxPADDING 9 — the values this test shipped with
+// before set 3 existed. A previous round widened them to 2..9, which silently weakened the absolute
+// assertion "some build carries at least 4 runs" into "some build carries more than 2"; set 3 now
+// carries the strong assertion, so set 2 is back to its original, tighter bounds.
+//
+// NO CONSTANT CAN SATISFY ALL THREE SETS even ignoring the distribution assertions: set 1 declares
+// PADDING 1..1 and set 2 declares 4..9, PING 1..1 against 4..7, CRYPTO 2..2 against 6..12.
 func TestUQUICRandomFramesHonoursTheDeclaredFrameBounds(t *testing.T) {
-	// The number of builds (out of n) that must carry at most MinPADDING runs. See the table above:
-	// the real builder produced at least 10 in 400 trials, a builder pinned at MaxPADDING never
-	// produced more than 2.
-	const minBuildsAtOrBelowMinPADDING = 4
-
-	for _, q := range []QUICRandomFrames{
-		{MinPING: 1, MaxPING: 1, MinCRYPTO: 2, MaxCRYPTO: 2, MinPADDING: 1, MaxPADDING: 1},
-		{MinPING: 4, MaxPING: 7, MinCRYPTO: 6, MaxCRYPTO: 12, MinPADDING: 2, MaxPADDING: 9},
+	for _, tc := range []struct {
+		q QUICRandomFrames
+		// minBuildsAtOrBelowMinPADDING: how many of the n builds must carry at most MinPADDING
+		// PADDING runs. This is what a builder pinned at MaxPADDING cannot produce. Measured per
+		// set — see the two tables above.
+		minBuildsAtOrBelowMinPADDING int
+		// exactPADDINGCeiling: on this set the separators so outnumber the PADDING frames that a
+		// build whose runs do not merge at all is routine, so MaxPADDING runs must be REACHED, not
+		// merely not exceeded. That equality is what a mid-range constant cannot satisfy.
+		exactPADDINGCeiling bool
+	}{
+		{q: QUICRandomFrames{MinPING: 1, MaxPING: 1, MinCRYPTO: 2, MaxCRYPTO: 2, MinPADDING: 1, MaxPADDING: 1}},
+		{q: QUICRandomFrames{MinPING: 4, MaxPING: 7, MinCRYPTO: 6, MaxCRYPTO: 12, MinPADDING: 4, MaxPADDING: 9}, minBuildsAtOrBelowMinPADDING: 30},
+		{q: QUICRandomFrames{MinPING: 18, MaxPING: 22, MinCRYPTO: 14, MaxCRYPTO: 16, MinPADDING: 2, MaxPADDING: 4}, minBuildsAtOrBelowMinPADDING: 20, exactPADDINGCeiling: true},
 	} {
+		q := tc.q
 		t.Run(fmt.Sprintf("CRYPTO %d..%d PING %d..%d PADDING %d..%d", q.MinCRYPTO, q.MaxCRYPTO, q.MinPING, q.MaxPING, q.MinPADDING, q.MaxPADDING), func(t *testing.T) {
 			chunks := testChunks()
 			require.LessOrEqualf(t, len(chunks), int(q.MinCRYPTO),
@@ -451,8 +483,8 @@ func TestUQUICRandomFramesHonoursTheDeclaredFrameBounds(t *testing.T) {
 			}
 
 			// The margins, on the record on every run rather than inferred from a green tick.
-			t.Logf("%d builds: CRYPTO frames %v, PING frames %v, PADDING runs %v (%d build(s) at or below MinPADDING=%d); the spec declares CRYPTO %d..%d, PING %d..%d, PADDING %d..%d",
-				n, cryptoCounts, pingCounts, runCounts, atOrBelowMinPADDING, q.MinPADDING,
+			t.Logf("%d builds: CRYPTO frames %v, PING frames %v, PADDING runs %v (%d build(s) at or below MinPADDING=%d, %d required); the spec declares CRYPTO %d..%d, PING %d..%d, PADDING %d..%d",
+				n, cryptoCounts, pingCounts, runCounts, atOrBelowMinPADDING, q.MinPADDING, tc.minBuildsAtOrBelowMinPADDING,
 				q.MinCRYPTO, q.MaxCRYPTO, q.MinPING, q.MaxPING, q.MinPADDING, q.MaxPADDING)
 
 			require.GreaterOrEqualf(t, maxRuns, int(q.MinPADDING),
@@ -475,13 +507,26 @@ func TestUQUICRandomFramesHonoursTheDeclaredFrameBounds(t *testing.T) {
 					n, maxPings, q.MaxPING, pingCounts)
 			}
 			if q.MinPADDING != q.MaxPADDING {
-				// PADDING runs merge, so the distribution is bounded from both sides instead.
-				require.Greaterf(t, maxRuns, int(q.MinPADDING),
-					"in %d builds no payload carried MORE than %d PADDING run(s) although the spec declares up to %d: a payload can never carry more runs than the frames the builder emitted, so the count is pinned at MinPADDING and MaxPADDING has stopped being read — %v",
-					n, q.MinPADDING, q.MaxPADDING, runCounts)
-				require.GreaterOrEqualf(t, atOrBelowMinPADDING, minBuildsAtOrBelowMinPADDING,
-					"in %d builds only %d carried as few as %d PADDING run(s) (at least %d expected; the real builder produced 10 or more in 400 measured trials, a builder pinned at MaxPADDING never more than 2) although the spec declares a floor of %d: the count is pinned at MaxPADDING and MinPADDING has stopped being read — %v",
-					n, atOrBelowMinPADDING, q.MinPADDING, minBuildsAtOrBelowMinPADDING, q.MinPADDING, runCounts)
+				if tc.exactPADDINGCeiling {
+					// The separator-rich set. An un-merged build is routine here (measured: the
+					// ceiling was reached in 200 of 200 trials of 120 builds), so the ceiling is an
+					// EQUALITY — and an equality no constant inside the range can satisfy, which is
+					// what makes the mid-pin and the sub-range go red instead of passing unnoticed.
+					require.Equalf(t, int(q.MaxPADDING), maxRuns,
+						"in %d builds the most PADDING runs any payload carried was %d and the spec declares a ceiling of %d: on this bound set the separators outnumber the PADDING frames %d..%d to %d, so an un-merged build reaching the ceiling is routine (measured 200/200 trials) — a ceiling that is never reached means the count is not being drawn from [MinPADDING,MaxPADDING] at all but from something strictly inside it, and every Initial this profile sends carries a PADDING shape the document never declared — %v",
+						n, maxRuns, q.MaxPADDING, int(q.MinPING)+int(q.MinCRYPTO), int(q.MaxPING)+int(q.MaxCRYPTO), q.MaxPADDING, runCounts)
+				} else {
+					// PADDING runs merge and this set has too few separators for the ceiling to be
+					// reachable, so only the weak lower bound is available here: at least one build
+					// must carry MORE than MinPADDING runs, which pinning at MinPADDING cannot do.
+					// It does NOT separate a mid-range constant — set 3 above is what does.
+					require.Greaterf(t, maxRuns, int(q.MinPADDING),
+						"in %d builds no payload carried MORE than %d PADDING run(s) although the spec declares up to %d: a payload can never carry more runs than the frames the builder emitted, so the count is pinned at MinPADDING and MaxPADDING has stopped being read — %v",
+						n, q.MinPADDING, q.MaxPADDING, runCounts)
+				}
+				require.GreaterOrEqualf(t, atOrBelowMinPADDING, tc.minBuildsAtOrBelowMinPADDING,
+					"in %d builds only %d carried as few as %d PADDING run(s) (at least %d expected — see the measured tables above this test) although the spec declares a floor of %d: the count is pinned at MaxPADDING and MinPADDING has stopped being read — %v",
+					n, atOrBelowMinPADDING, q.MinPADDING, tc.minBuildsAtOrBelowMinPADDING, q.MinPADDING, runCounts)
 			}
 		})
 	}

@@ -394,51 +394,78 @@ func uDialOneInitial(t *testing.T, spec *QUICSpec, conf *Config) []byte {
 //
 // It is here for the same reason TestUTransportPinsWhateverFirstPacketNumberTheSpecAsks is: with one
 // bound set in play everywhere, replacing the builder's spec reads with constants inside that set's
-// range left the entire package green. Two sets that share no value cannot both be satisfied by a
-// constant, and reading the counts off the DECRYPTED datagram proves the spec reached the packer
-// rather than only the builder's own unit test.
+// range left the entire package green. Sets that no single constant can satisfy together cannot, and
+// reading the counts off the DECRYPTED datagram proves the spec reached the packer rather than only
+// the builder's own unit test.
 //
-// WHAT THE RANGE ASSERTIONS MISSED, and why this dials 200 times. Until this round the varying set
-// was dialled ONCE and only Min <= x <= Max was asserted, so every constant inside the declared
-// range passed — including the two constants a HALF-read spec produces. Three single-factor
-// mutations of the builder, each applied alone, left the whole package green (see the header of
-// TestUQUICRandomFramesHonoursTheDeclaredFrameBounds for the exact edits). A single connection
-// cannot distinguish "drawn from 2..8" from "pinned at 5": only the DISTRIBUTION over connections
-// can, and a connection here costs 0.13 ms.
+// WHAT THE RANGE ASSERTIONS MISSED, and why this dials 200 times. Until recently the varying set was
+// dialled ONCE and only Min <= x <= Max was asserted, so every constant inside the declared range
+// passed — including the two constants a HALF-read spec produces, and the two subtler ones (a
+// sub-range, and a pin at the midpoint) that still VARY build to build once PADDING runs merge. Five
+// single-factor mutations of the builder, each applied alone, have defeated earlier versions of this
+// test; they are listed with their edits in the header of
+// TestUQUICRandomFramesHonoursTheDeclaredFrameBounds. A single connection cannot distinguish "drawn
+// from 3..6" from "pinned at 4": only the DISTRIBUTION over connections can, and a connection here
+// costs 0.13 ms.
 //
-// Measured on this machine, 30 trials of 200 dials each, for the 2..8 / 4..7 / 9..12 set below:
+// Measured on this machine, 20 trials of 200 dials each, with the builder in this tree and the
+// mutations emulated exactly (a pin at k is the degenerate range k..k, the same draw the mutated
+// randUint64 makes):
 //
-//	                       PING seen      CRYPTO seen   max PADDING runs   dials with runs <= MinPADDING
-//	real builder           4..7 always    9..12 always  >= 7 always        28..51
-//	PADDING pinned at Min  4..7           9..12         2 always           200
-//	PADDING pinned at Max  4..7           9..12         >= 8 always        0..2
-//	PING pinned at Min     4..4           9..12         >= 7               32..54
-//	PING pinned at Max     7..7           9..12         >= 7               28..55
+//	SET 2  CRYPTO 9..12  PING 4..7  PADDING 3..6
+//	                       max PADDING runs in a trial   dials with runs <= MinPADDING
+//	  real builder         6  in 20/20 trials            82..108
+//	  pinned at MaxPADDING 6  in 20/20 trials            15..31
+//	  pinned at MinPADDING 3  (every trial)              200
+//	  mid-pin (4)          4  (every trial)              86..111
 //
-// so each of the six declared fields has an assertion below that no other field can satisfy for it.
+//	SET 3  CRYPTO 14..16  PING 18..22  PADDING 2..4
+//	                       max PADDING runs in a trial   dials with runs <= MinPADDING
+//	  real builder         4  in 20/20 trials            69..88
+//	  pinned at MaxPADDING 4  in 20/20 trials             1..10
+//	  pinned at MinPADDING 2  (every trial)              200
+//	  mid-pin / sub-range  3  (every trial)              23..43
+//
 // PING frames and CRYPTO frames are counted EXACTLY off the wire (a PING is one 0x01 byte; a CRYPTO
-// frame carries its own length), so for those the ends of the declared range must be REACHED. Two
-// PADDING frames that the shuffle puts side by side read back as ONE run, so PADDING is bounded by
-// its distribution instead: some dial must exceed MinPADDING runs (impossible when the count is
-// pinned at Min) and at least minDialsAtOrBelowMinPADDING dials must be at or below MinPADDING
-// (which pinning at Max produced at most twice in 6000 dials).
+// frame carries its own length), so for those the ends of the declared range must be REACHED, which
+// no constant anywhere in the range can do.
+//
+// PADDING runs MERGE — two PADDING frames the shuffle puts side by side read back as ONE run — so
+// runs <= frames emitted, always, and the ceiling is only reachable when the separators outnumber the
+// PADDING frames. On SET 3 they do, by 32..38 to 4: the ceiling was reached in every one of 4000
+// measured dials' trials and in 916 of the 4000 dials individually, so it is asserted as an EQUALITY
+// there and that equality is what kills the mid-pin and the sub-range. On SET 2 the ceiling is
+// reached in only 4% of dials (162 of 4000), which over 200 dials would flake about once in 4000
+// runs, so SET 2 keeps the weak lower bound instead and the exact assertion lives on SET 3 alone.
+// Both sets' at-or-below counts kill the MaxPADDING pin, with ~5 sigma of margin on each side of the
+// thresholds below (see the tables). Every histogram is logged on every run.
+//
+// NOTE ON SET 2's BOUNDS. They are PADDING 3..6 — the values this test shipped with before SET 3
+// existed. A previous round widened them to 2..8, which silently weakened the per-dial ceiling
+// assertion "runs <= 6" into "runs <= 8"; SET 3 now carries the strong assertion, so SET 2 is back to
+// its original, tighter bounds.
 func TestUTransportInitialFrameCountsComeFromTheSpecsBounds(t *testing.T) {
-	// See the table above: the real builder put 28 or more dials at or below MinPADDING in every one
-	// of 30 trials, a builder pinned at MaxPADDING never more than 2.
-	const minDialsAtOrBelowMinPADDING = 10
-
-	// MinCRYPTO is >= 3 in both sets because quic-go's initial crypto stream hands the builder three
-	// CRYPTO chunks for this ClientHello (measured, 5/5 dials) and the builder can only SPLIT them,
-	// never merge — so a set asking for fewer would be unsatisfiable by construction rather than by
-	// the spec. Neither set contains 3, which is the count the constant-mutation produces.
+	// MinCRYPTO is >= 3 in every ranged set because quic-go's initial crypto stream hands the builder
+	// three CRYPTO chunks for this ClientHello (measured, 5/5 dials) and the builder can only SPLIT
+	// them, never merge — so a set asking for fewer would be unsatisfiable by construction rather than
+	// by the spec. No set contains 3, which is the count the constant-mutation produces.
 	for _, tc := range []struct {
 		fb    QUICRandomFrames
 		dials int
+		// minDialsAtOrBelowMinPADDING: how many of the dials must carry at most MinPADDING PADDING
+		// runs. This is what a builder pinned at MaxPADDING cannot produce. Measured per set.
+		minDialsAtOrBelowMinPADDING int
+		// exactPADDINGCeiling: on this set the separators so outnumber the PADDING frames that an
+		// un-merged Initial reaching MaxPADDING runs is routine, so the ceiling must be REACHED.
+		// That equality is what a constant strictly inside the range cannot satisfy.
+		exactPADDINGCeiling bool
 	}{
-		// Every bound pinned: one dial decides it, and it shares no value with the set below.
-		{QUICRandomFrames{MinPING: 1, MaxPING: 1, MinCRYPTO: 4, MaxCRYPTO: 5, MinPADDING: 1, MaxPADDING: 1}, 1},
-		// Every bound a range: the distribution over dials decides it.
-		{QUICRandomFrames{MinPING: 4, MaxPING: 7, MinCRYPTO: 9, MaxCRYPTO: 12, MinPADDING: 2, MaxPADDING: 8}, 200},
+		// Every bound pinned: one dial decides it, and no constant satisfies it and the sets below.
+		{fb: QUICRandomFrames{MinPING: 1, MaxPING: 1, MinCRYPTO: 4, MaxCRYPTO: 5, MinPADDING: 1, MaxPADDING: 1}, dials: 1},
+		// Every bound a range, few separators: the distribution over dials decides it.
+		{fb: QUICRandomFrames{MinPING: 4, MaxPING: 7, MinCRYPTO: 9, MaxCRYPTO: 12, MinPADDING: 3, MaxPADDING: 6}, dials: 200, minDialsAtOrBelowMinPADDING: 55},
+		// Separator-rich: the PADDING ceiling is exactly reachable, so it is asserted exactly.
+		{fb: QUICRandomFrames{MinPING: 18, MaxPING: 22, MinCRYPTO: 14, MaxCRYPTO: 16, MinPADDING: 2, MaxPADDING: 4}, dials: 200, minDialsAtOrBelowMinPADDING: 45, exactPADDINGCeiling: true},
 	} {
 		fb := tc.fb
 		t.Run(fmt.Sprintf("CRYPTO %d..%d PING %d..%d PADDING %d..%d in %d dial(s)", fb.MinCRYPTO, fb.MaxCRYPTO, fb.MinPING, fb.MaxPING, fb.MinPADDING, fb.MaxPADDING, tc.dials), func(t *testing.T) {
@@ -479,8 +506,8 @@ func TestUTransportInitialFrameCountsComeFromTheSpecsBounds(t *testing.T) {
 			}
 
 			// The margins, on the record on every run rather than inferred from a green tick.
-			t.Logf("%d dial(s): CRYPTO frames %v, PING frames %v, PADDING runs %v (%d dial(s) at or below MinPADDING=%d); this dial's spec declares CRYPTO %d..%d, PING %d..%d, PADDING %d..%d",
-				tc.dials, cryptoCounts, pingCounts, runCounts, atOrBelowMinPADDING, fb.MinPADDING,
+			t.Logf("%d dial(s): CRYPTO frames %v, PING frames %v, PADDING runs %v (%d dial(s) at or below MinPADDING=%d, %d required); this dial's spec declares CRYPTO %d..%d, PING %d..%d, PADDING %d..%d",
+				tc.dials, cryptoCounts, pingCounts, runCounts, atOrBelowMinPADDING, fb.MinPADDING, tc.minDialsAtOrBelowMinPADDING,
 				fb.MinCRYPTO, fb.MaxCRYPTO, fb.MinPING, fb.MaxPING, fb.MinPADDING, fb.MaxPADDING)
 
 			if tc.dials == 1 {
@@ -498,12 +525,26 @@ func TestUTransportInitialFrameCountsComeFromTheSpecsBounds(t *testing.T) {
 			require.Equalf(t, int(fb.MaxPING), maxPings,
 				"in %d dials the most PING frames any Initial carried was %d and this dial's spec declares a ceiling of %d: MaxPING has stopped reaching the packer, so every Initial this profile sends carries a PING count the document never declared — %v",
 				tc.dials, maxPings, fb.MaxPING, pingCounts)
-			require.Greaterf(t, maxRuns, int(fb.MinPADDING),
-				"in %d dials no Initial carried MORE than %d PADDING run(s) although this dial's spec declares up to %d: an Initial can never carry more runs than the frames the builder emitted, so the count is pinned at MinPADDING and MaxPADDING never reaches the packer — %v",
-				tc.dials, fb.MinPADDING, fb.MaxPADDING, runCounts)
-			require.GreaterOrEqualf(t, atOrBelowMinPADDING, minDialsAtOrBelowMinPADDING,
-				"in %d dials only %d Initial(s) carried as few as %d PADDING run(s) (at least %d expected; the real builder produced 28 or more in 30 measured trials, a builder pinned at MaxPADDING never more than 2) although this dial's spec declares a floor of %d: the count is pinned at MaxPADDING and MinPADDING never reaches the packer — %v",
-				tc.dials, atOrBelowMinPADDING, fb.MinPADDING, minDialsAtOrBelowMinPADDING, fb.MinPADDING, runCounts)
+			if tc.exactPADDINGCeiling {
+				// The separator-rich set: an un-merged Initial reaching the ceiling is routine
+				// (measured: 916 of 4000 dials individually, and the ceiling reached in 20/20
+				// trials of 200), so the ceiling is an EQUALITY — and one that no constant strictly
+				// inside [MinPADDING,MaxPADDING] can satisfy, which is what makes a mid-range pin and
+				// a sub-range draw go red here instead of passing as "it still varies".
+				require.Equalf(t, int(fb.MaxPADDING), maxRuns,
+					"in %d dials the most PADDING runs any Initial carried was %d and this dial's spec declares a ceiling of %d: on this bound set the separators outnumber the PADDING frames %d..%d to %d, so an un-merged Initial reaching the ceiling is routine (measured in 20 of 20 trials) — a ceiling that is never reached means the count never comes from [MinPADDING,MaxPADDING] but from something strictly inside it, and every Initial this spec sends carries a PADDING shape the document never declared — %v",
+					tc.dials, maxRuns, fb.MaxPADDING, int(fb.MinPING)+int(fb.MinCRYPTO), int(fb.MaxPING)+int(fb.MaxCRYPTO), fb.MaxPADDING, runCounts)
+			} else {
+				// Too few separators here for the ceiling to be reached reliably (4% of dials), so
+				// only the weak lower bound is asserted on this set. It does NOT separate a constant
+				// strictly inside the range — the separator-rich set above is what does.
+				require.Greaterf(t, maxRuns, int(fb.MinPADDING),
+					"in %d dials no Initial carried MORE than %d PADDING run(s) although this dial's spec declares up to %d: an Initial can never carry more runs than the frames the builder emitted, so the count is pinned at MinPADDING and MaxPADDING never reaches the packer — %v",
+					tc.dials, fb.MinPADDING, fb.MaxPADDING, runCounts)
+			}
+			require.GreaterOrEqualf(t, atOrBelowMinPADDING, tc.minDialsAtOrBelowMinPADDING,
+				"in %d dials only %d Initial(s) carried as few as %d PADDING run(s) (at least %d expected — see the measured tables above this test) although this dial's spec declares a floor of %d: the count is pinned at MaxPADDING and MinPADDING never reaches the packer — %v",
+				tc.dials, atOrBelowMinPADDING, fb.MinPADDING, tc.minDialsAtOrBelowMinPADDING, fb.MinPADDING, runCounts)
 		})
 	}
 }
