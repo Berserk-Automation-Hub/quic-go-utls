@@ -332,8 +332,8 @@ func splitFrames(t *testing.T, b []byte) []builtFrame {
 	return out
 }
 
-// TestUQUICRandomFramesHonoursTheDeclaredFrameBounds is the guard for the four spec fields the
-// builder reads and nothing else in this fork asserted: MinCRYPTO/MaxCRYPTO and
+// TestUQUICRandomFramesHonoursTheDeclaredFrameBounds is the guard for the SIX spec fields the
+// builder reads and nothing else in this fork asserted: MinCRYPTO/MaxCRYPTO, MinPING/MaxPING and
 // MinPADDING/MaxPADDING.
 //
 // WHY IT EXISTS. Every other test here drives ONE builder value (1,3,3,8,2,6), so a builder that
@@ -352,17 +352,55 @@ func splitFrames(t *testing.T, b []byte) []builtFrame {
 // So this drives TWO bound sets that share no value, and requires the emitted counts to track EACH.
 // A constant cannot satisfy both.
 //
+// WHY A RANGE ASSERTION IS NOT ENOUGH, and what replaced it. A pair of Min<=x<=Max assertions is
+// satisfied by every constant INSIDE the declared range, so it catches a builder that ignores the
+// spec entirely and misses one that reads only HALF of it. Three single-factor mutations, each
+// applied alone to the tag this fork last shipped, left the whole package green:
+//
+//	randUint64(uint64(q.MinPADDING), uint64(q.MaxPADDING)) -> randUint64(uint64(q.MaxPADDING), uint64(q.MaxPADDING))  // MinPADDING unread
+//	randUint64(uint64(q.MinPADDING), uint64(q.MaxPADDING)) -> randUint64(uint64(q.MinPADDING), uint64(q.MinPADDING))  // MaxPADDING unread
+//	randUint64(uint64(q.MinPING), uint64(q.MaxPING))       -> randUint64(uint64(q.MinPING), uint64(q.MinPING))        // MaxPING unread
+//	  => ok  github.com/Berserk-Automation-Hub/quic-go-utls  ~21.3s each   (the WHOLE package)
+//
+// The CRYPTO half was already immune, because it asserts the DISTRIBUTION (len(cryptoCounts) > 1)
+// rather than the range. PING and PADDING now assert their distributions too, in the strongest form
+// each frame type admits:
+//
+//   - PING frames never merge on the wire (one 0x01 byte each, counted individually), so the count
+//     is EXACT: across n builds the smallest must be exactly MinPING and the largest exactly MaxPING.
+//     Either pin makes one of those two equalities false with probability 1.
+//   - PADDING runs DO merge (see below), so the exact form is unavailable and the distribution is
+//     bounded from both sides instead: at least one build must carry MORE than MinPADDING runs
+//     (impossible when the count is pinned at Min, since runs <= frames emitted), and at least
+//     `minBuildsAtOrBelowMinPADDING` builds must carry no more than MinPADDING runs (which pinning
+//     at Max cannot produce often enough).
+//
+// Both PADDING thresholds are measured, not guessed. 400 independent trials of n=120 builds each,
+// on this machine, with the 2..9 bound set below:
+//
+//	                       max PADDING runs seen in a trial   builds with runs <= MinPADDING
+//	real builder (2..9)    >= 7 in every trial                10..36  (min over 400 trials: 10)
+//	pinned at MinPADDING   2 in every trial (by construction)  120
+//	pinned at MaxPADDING   >= 8 in every trial                 0..2   (max over 400 trials: 2)
+//
+// so "> MinPADDING" separates the Min pin with no overlap at all, and ">= 4 builds at or below
+// MinPADDING" separates the Max pin by 2 against 10. Both histograms are logged on every run, so a
+// margin that starts to erode is visible in the test output rather than only when it flakes.
+//
 // ON THE PADDING LOWER BOUND. The builder emits numPADDING separate PADDING frames and then shuffles
 // them in among the CRYPTO and PING frames. Two PADDING frames that land side by side read back off
 // the wire as ONE run, because QUIC's PADDING frame is a single zero byte and a reader cannot tell
 // four of them in one frame from four one-byte frames. The per-build UPPER bound is therefore exact
-// (runs <= frames emitted <= MaxPADDING) while the lower bound is only reachable across builds, so
-// it is asserted as "the largest run count seen in n builds is at least MinPADDING". Both halves go
-// red under the mutation above.
+// (runs <= frames emitted <= MaxPADDING) while the lower bound is only reachable across builds.
 func TestUQUICRandomFramesHonoursTheDeclaredFrameBounds(t *testing.T) {
+	// The number of builds (out of n) that must carry at most MinPADDING runs. See the table above:
+	// the real builder produced at least 10 in 400 trials, a builder pinned at MaxPADDING never
+	// produced more than 2.
+	const minBuildsAtOrBelowMinPADDING = 4
+
 	for _, q := range []QUICRandomFrames{
 		{MinPING: 1, MaxPING: 1, MinCRYPTO: 2, MaxCRYPTO: 2, MinPADDING: 1, MaxPADDING: 1},
-		{MinPING: 4, MaxPING: 7, MinCRYPTO: 6, MaxCRYPTO: 12, MinPADDING: 4, MaxPADDING: 9},
+		{MinPING: 4, MaxPING: 7, MinCRYPTO: 6, MaxCRYPTO: 12, MinPADDING: 2, MaxPADDING: 9},
 	} {
 		t.Run(fmt.Sprintf("CRYPTO %d..%d PING %d..%d PADDING %d..%d", q.MinCRYPTO, q.MaxCRYPTO, q.MinPING, q.MaxPING, q.MinPADDING, q.MaxPADDING), func(t *testing.T) {
 			chunks := testChunks()
@@ -372,7 +410,9 @@ func TestUQUICRandomFramesHonoursTheDeclaredFrameBounds(t *testing.T) {
 
 			const n = 120
 			cryptoCounts := map[int]int{}
-			maxRuns := 0
+			pingCounts := map[int]int{}
+			runCounts := map[int]int{}
+			maxRuns, minPings, maxPings, atOrBelowMinPADDING := 0, -1, -1, 0
 			for i := 0; i < n; i++ {
 				out, err := q.Build(chunks, 1215)
 				require.NoError(t, err)
@@ -394,10 +434,26 @@ func TestUQUICRandomFramesHonoursTheDeclaredFrameBounds(t *testing.T) {
 				require.Positivef(t, pf.runs, "the payload carries no PADDING at all; the spec declares at least %d run(s)", q.MinPADDING)
 
 				cryptoCounts[len(pf.crypto)]++
+				pingCounts[pf.pings]++
+				runCounts[pf.runs]++
 				if pf.runs > maxRuns {
 					maxRuns = pf.runs
 				}
+				if pf.runs <= int(q.MinPADDING) {
+					atOrBelowMinPADDING++
+				}
+				if minPings < 0 || pf.pings < minPings {
+					minPings = pf.pings
+				}
+				if pf.pings > maxPings {
+					maxPings = pf.pings
+				}
 			}
+
+			// The margins, on the record on every run rather than inferred from a green tick.
+			t.Logf("%d builds: CRYPTO frames %v, PING frames %v, PADDING runs %v (%d build(s) at or below MinPADDING=%d); the spec declares CRYPTO %d..%d, PING %d..%d, PADDING %d..%d",
+				n, cryptoCounts, pingCounts, runCounts, atOrBelowMinPADDING, q.MinPADDING,
+				q.MinCRYPTO, q.MaxCRYPTO, q.MinPING, q.MaxPING, q.MinPADDING, q.MaxPADDING)
 
 			require.GreaterOrEqualf(t, maxRuns, int(q.MinPADDING),
 				"in %d builds the most PADDING runs any payload carried was %d, and the spec declares at least %d: the PADDING count is pinned below what this profile declares, so the Initial's padding shape is a constant rather than the document's",
@@ -406,6 +462,26 @@ func TestUQUICRandomFramesHonoursTheDeclaredFrameBounds(t *testing.T) {
 				require.Greaterf(t, len(cryptoCounts), 1,
 					"in %d builds the CRYPTO-frame count was always %v although the spec declares a range of %d..%d: the count is a constant inside the range, so half the declaration is not being read",
 					n, cryptoCounts, q.MinCRYPTO, q.MaxCRYPTO)
+			}
+			if q.MinPING != q.MaxPING {
+				// PING frames do not merge, so both ends of the declared range must be REACHED, not
+				// merely respected. min != MinPING means the floor is not being drawn from; max !=
+				// MaxPING means the ceiling is not.
+				require.Equalf(t, int(q.MinPING), minPings,
+					"in %d builds the fewest PING frames any payload carried was %d and the spec declares a floor of %d: the count is not being drawn from [MinPING,MaxPING] (PING frames never merge on the wire, so the floor is reachable exactly) — %v",
+					n, minPings, q.MinPING, pingCounts)
+				require.Equalf(t, int(q.MaxPING), maxPings,
+					"in %d builds the most PING frames any payload carried was %d and the spec declares a ceiling of %d: the count is not being drawn from [MinPING,MaxPING], so MaxPING has stopped being read and every Initial this profile sends carries a PING count the document never declared — %v",
+					n, maxPings, q.MaxPING, pingCounts)
+			}
+			if q.MinPADDING != q.MaxPADDING {
+				// PADDING runs merge, so the distribution is bounded from both sides instead.
+				require.Greaterf(t, maxRuns, int(q.MinPADDING),
+					"in %d builds no payload carried MORE than %d PADDING run(s) although the spec declares up to %d: a payload can never carry more runs than the frames the builder emitted, so the count is pinned at MinPADDING and MaxPADDING has stopped being read — %v",
+					n, q.MinPADDING, q.MaxPADDING, runCounts)
+				require.GreaterOrEqualf(t, atOrBelowMinPADDING, minBuildsAtOrBelowMinPADDING,
+					"in %d builds only %d carried as few as %d PADDING run(s) (at least %d expected; the real builder produced 10 or more in 400 measured trials, a builder pinned at MaxPADDING never more than 2) although the spec declares a floor of %d: the count is pinned at MaxPADDING and MinPADDING has stopped being read — %v",
+					n, atOrBelowMinPADDING, q.MinPADDING, minBuildsAtOrBelowMinPADDING, q.MinPADDING, runCounts)
 			}
 		})
 	}

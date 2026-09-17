@@ -343,50 +343,167 @@ func TestUTransportPinsWhateverFirstPacketNumberTheSpecAsks(t *testing.T) {
 	}
 }
 
+// uDialOneInitial dials into the void and returns ONLY the first datagram, cancelling the dial the
+// moment that datagram is on the wire.
+//
+// uDialIntoTheVoid waits out a 1.1 s read deadline to collect the whole flight, which is right when
+// the flight is the subject — but it costs 1.1 s per dial. The frame-bound guard below needs
+// HUNDREDS of independent first Initials, because a per-connection random layout is only observable
+// ACROSS connections, and at 1.1 s each that would be four minutes. One datagram and a cancel costs
+// ~0.13 ms (measured: 200 dials in 25 ms), so the shipped-path guard can assert a distribution
+// instead of a range.
+func uDialOneInitial(t *testing.T, spec *QUICSpec, conf *Config) []byte {
+	t.Helper()
+	sink, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	require.NoError(t, err)
+	defer sink.Close()
+	cli, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	require.NoError(t, err)
+	defer cli.Close()
+
+	tr := &UTransport{Transport: &Transport{Conn: cli}, QUICSpec: spec}
+	defer tr.Close()
+
+	ctx, cancel := context.WithTimeout(context.Background(), 700*time.Millisecond)
+	defer cancel()
+	dialErr := make(chan error, 1)
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		_, err := tr.DialEarly(ctx, sink.LocalAddr(), uTestTLSConfig(), conf)
+		dialErr <- err
+	}()
+
+	require.NoError(t, sink.SetReadDeadline(time.Now().Add(900*time.Millisecond)))
+	buf := make([]byte, 2048)
+	n, _, rerr := sink.ReadFrom(buf)
+	cancel()
+	<-done
+	// A dial that emits nothing has usually loud-failed inside the packer, and that error is the
+	// interesting one — reporting only the read deadline would hide it.
+	require.NoErrorf(t, rerr, "the dial put nothing on the wire; it failed with: %v", <-dialErr)
+	out := make([]byte, n)
+	copy(out, buf[:n])
+	return out
+}
+
 // TestUTransportInitialFrameCountsComeFromTheSpecsBounds is the SHIPPED-PATH half of the frame-bound
-// guard (the builder-level half is TestUQUICRandomFramesHonoursTheDeclaredFrameBounds): the CRYPTO
-// and PADDING counts on an Initial that really left a socket track the bounds THIS dial's spec
+// guard (the builder-level half is TestUQUICRandomFramesHonoursTheDeclaredFrameBounds): the CRYPTO,
+// PING and PADDING counts on Initials that really left a socket track the bounds THIS dial's spec
 // declares, and not a constant compiled into the builder.
 //
 // It is here for the same reason TestUTransportPinsWhateverFirstPacketNumberTheSpecAsks is: with one
-// bound set in play everywhere, replacing the builder's two spec reads with constants inside that
-// set's range left the entire package green. Two sets that share no value cannot both be satisfied
-// by a constant, and reading the counts off the DECRYPTED datagram proves the spec reached the
-// packer rather than only the builder's own unit test.
+// bound set in play everywhere, replacing the builder's spec reads with constants inside that set's
+// range left the entire package green. Two sets that share no value cannot both be satisfied by a
+// constant, and reading the counts off the DECRYPTED datagram proves the spec reached the packer
+// rather than only the builder's own unit test.
 //
-// The per-dial PADDING assertion is an UPPER bound only, deliberately: the builder's PADDING frames
-// are shuffled in among the CRYPTO and PING frames and two that land side by side read back as one
-// run, so a lower bound on a single connection fails about one dial in twelve (measured; §7, "One
-// assertion REMOVED"). The lower bound is asserted across 120 builds in the builder test instead.
+// WHAT THE RANGE ASSERTIONS MISSED, and why this dials 200 times. Until this round the varying set
+// was dialled ONCE and only Min <= x <= Max was asserted, so every constant inside the declared
+// range passed — including the two constants a HALF-read spec produces. Three single-factor
+// mutations of the builder, each applied alone, left the whole package green (see the header of
+// TestUQUICRandomFramesHonoursTheDeclaredFrameBounds for the exact edits). A single connection
+// cannot distinguish "drawn from 2..8" from "pinned at 5": only the DISTRIBUTION over connections
+// can, and a connection here costs 0.13 ms.
+//
+// Measured on this machine, 30 trials of 200 dials each, for the 2..8 / 4..7 / 9..12 set below:
+//
+//	                       PING seen      CRYPTO seen   max PADDING runs   dials with runs <= MinPADDING
+//	real builder           4..7 always    9..12 always  >= 7 always        28..51
+//	PADDING pinned at Min  4..7           9..12         2 always           200
+//	PADDING pinned at Max  4..7           9..12         >= 8 always        0..2
+//	PING pinned at Min     4..4           9..12         >= 7               32..54
+//	PING pinned at Max     7..7           9..12         >= 7               28..55
+//
+// so each of the six declared fields has an assertion below that no other field can satisfy for it.
+// PING frames and CRYPTO frames are counted EXACTLY off the wire (a PING is one 0x01 byte; a CRYPTO
+// frame carries its own length), so for those the ends of the declared range must be REACHED. Two
+// PADDING frames that the shuffle puts side by side read back as ONE run, so PADDING is bounded by
+// its distribution instead: some dial must exceed MinPADDING runs (impossible when the count is
+// pinned at Min) and at least minDialsAtOrBelowMinPADDING dials must be at or below MinPADDING
+// (which pinning at Max produced at most twice in 6000 dials).
 func TestUTransportInitialFrameCountsComeFromTheSpecsBounds(t *testing.T) {
+	// See the table above: the real builder put 28 or more dials at or below MinPADDING in every one
+	// of 30 trials, a builder pinned at MaxPADDING never more than 2.
+	const minDialsAtOrBelowMinPADDING = 10
+
 	// MinCRYPTO is >= 3 in both sets because quic-go's initial crypto stream hands the builder three
 	// CRYPTO chunks for this ClientHello (measured, 5/5 dials) and the builder can only SPLIT them,
 	// never merge — so a set asking for fewer would be unsatisfiable by construction rather than by
 	// the spec. Neither set contains 3, which is the count the constant-mutation produces.
-	for _, fb := range []QUICRandomFrames{
-		{MinPING: 1, MaxPING: 1, MinCRYPTO: 4, MaxCRYPTO: 5, MinPADDING: 1, MaxPADDING: 1},
-		{MinPING: 4, MaxPING: 7, MinCRYPTO: 9, MaxCRYPTO: 12, MinPADDING: 3, MaxPADDING: 6},
+	for _, tc := range []struct {
+		fb    QUICRandomFrames
+		dials int
+	}{
+		// Every bound pinned: one dial decides it, and it shares no value with the set below.
+		{QUICRandomFrames{MinPING: 1, MaxPING: 1, MinCRYPTO: 4, MaxCRYPTO: 5, MinPADDING: 1, MaxPADDING: 1}, 1},
+		// Every bound a range: the distribution over dials decides it.
+		{QUICRandomFrames{MinPING: 4, MaxPING: 7, MinCRYPTO: 9, MaxCRYPTO: 12, MinPADDING: 2, MaxPADDING: 8}, 200},
 	} {
-		t.Run(fmt.Sprintf("CRYPTO %d..%d PING %d..%d PADDING %d..%d", fb.MinCRYPTO, fb.MaxCRYPTO, fb.MinPING, fb.MaxPING, fb.MinPADDING, fb.MaxPADDING), func(t *testing.T) {
+		fb := tc.fb
+		t.Run(fmt.Sprintf("CRYPTO %d..%d PING %d..%d PADDING %d..%d in %d dial(s)", fb.MinCRYPTO, fb.MaxCRYPTO, fb.MinPING, fb.MaxPING, fb.MinPADDING, fb.MaxPADDING, tc.dials), func(t *testing.T) {
 			spec := uTestSpec()
 			spec.InitialPacketSpec.FrameBuilder = &fb
-			datagrams := uDialIntoTheVoid(t, spec, uTestQUICConfig())
-			_, payload := uDecryptInitial(t, datagrams[0])
-			pf := parseInitialPayload(t, payload)
 
-			require.GreaterOrEqualf(t, len(pf.crypto), int(fb.MinCRYPTO),
-				"the Initial on the wire carries %d CRYPTO frame(s) and this dial's spec declares at least %d: the layout that left the socket is not the one the profile declared",
-				len(pf.crypto), fb.MinCRYPTO)
-			require.LessOrEqualf(t, len(pf.crypto), int(fb.MaxCRYPTO),
-				"the Initial on the wire carries %d CRYPTO frame(s) and this dial's spec declares at most %d: the layout that left the socket is not the one the profile declared",
-				len(pf.crypto), fb.MaxCRYPTO)
-			require.GreaterOrEqualf(t, pf.pings, int(fb.MinPING),
-				"the Initial on the wire carries %d PING frame(s), this dial's spec declares at least %d", pf.pings, fb.MinPING)
-			require.LessOrEqualf(t, pf.pings, int(fb.MaxPING),
-				"the Initial on the wire carries %d PING frame(s), this dial's spec declares at most %d", pf.pings, fb.MaxPING)
-			require.Positivef(t, pf.runs, "the Initial on the wire carries no PADDING; this dial's spec declares %d..%d runs", fb.MinPADDING, fb.MaxPADDING)
-			require.LessOrEqualf(t, pf.runs, int(fb.MaxPADDING),
-				"the Initial on the wire carries %d PADDING run(s) and this dial's spec declares at most %d", pf.runs, fb.MaxPADDING)
+			cryptoCounts, pingCounts, runCounts := map[int]int{}, map[int]int{}, map[int]int{}
+			minCrypto, maxCrypto := 1<<30, 0
+			minPings, maxPings := 1<<30, 0
+			maxRuns, atOrBelowMinPADDING := 0, 0
+			for i := 0; i < tc.dials; i++ {
+				_, payload := uDecryptInitial(t, uDialOneInitial(t, spec, uTestQUICConfig()))
+				pf := parseInitialPayload(t, payload)
+
+				require.GreaterOrEqualf(t, len(pf.crypto), int(fb.MinCRYPTO),
+					"the Initial on the wire carries %d CRYPTO frame(s) and this dial's spec declares at least %d: the layout that left the socket is not the one the profile declared",
+					len(pf.crypto), fb.MinCRYPTO)
+				require.LessOrEqualf(t, len(pf.crypto), int(fb.MaxCRYPTO),
+					"the Initial on the wire carries %d CRYPTO frame(s) and this dial's spec declares at most %d: the layout that left the socket is not the one the profile declared",
+					len(pf.crypto), fb.MaxCRYPTO)
+				require.GreaterOrEqualf(t, pf.pings, int(fb.MinPING),
+					"the Initial on the wire carries %d PING frame(s), this dial's spec declares at least %d", pf.pings, fb.MinPING)
+				require.LessOrEqualf(t, pf.pings, int(fb.MaxPING),
+					"the Initial on the wire carries %d PING frame(s), this dial's spec declares at most %d", pf.pings, fb.MaxPING)
+				require.Positivef(t, pf.runs, "the Initial on the wire carries no PADDING; this dial's spec declares %d..%d runs", fb.MinPADDING, fb.MaxPADDING)
+				require.LessOrEqualf(t, pf.runs, int(fb.MaxPADDING),
+					"the Initial on the wire carries %d PADDING run(s) and this dial's spec declares at most %d", pf.runs, fb.MaxPADDING)
+
+				cryptoCounts[len(pf.crypto)]++
+				pingCounts[pf.pings]++
+				runCounts[pf.runs]++
+				minCrypto, maxCrypto = min(minCrypto, len(pf.crypto)), max(maxCrypto, len(pf.crypto))
+				minPings, maxPings = min(minPings, pf.pings), max(maxPings, pf.pings)
+				maxRuns = max(maxRuns, pf.runs)
+				if pf.runs <= int(fb.MinPADDING) {
+					atOrBelowMinPADDING++
+				}
+			}
+
+			// The margins, on the record on every run rather than inferred from a green tick.
+			t.Logf("%d dial(s): CRYPTO frames %v, PING frames %v, PADDING runs %v (%d dial(s) at or below MinPADDING=%d); this dial's spec declares CRYPTO %d..%d, PING %d..%d, PADDING %d..%d",
+				tc.dials, cryptoCounts, pingCounts, runCounts, atOrBelowMinPADDING, fb.MinPADDING,
+				fb.MinCRYPTO, fb.MaxCRYPTO, fb.MinPING, fb.MaxPING, fb.MinPADDING, fb.MaxPADDING)
+
+			if tc.dials == 1 {
+				return // a single connection can only decide the per-dial bounds above
+			}
+			require.Equalf(t, int(fb.MinCRYPTO), minCrypto,
+				"in %d dials the fewest CRYPTO frames any Initial carried was %d and this dial's spec declares a floor of %d: the split count is not being drawn from [MinCRYPTO,MaxCRYPTO], so MinCRYPTO never reaches the packer — %v",
+				tc.dials, minCrypto, fb.MinCRYPTO, cryptoCounts)
+			require.Equalf(t, int(fb.MaxCRYPTO), maxCrypto,
+				"in %d dials the most CRYPTO frames any Initial carried was %d and this dial's spec declares a ceiling of %d: the split count is not being drawn from [MinCRYPTO,MaxCRYPTO], so MaxCRYPTO never reaches the packer — %v",
+				tc.dials, maxCrypto, fb.MaxCRYPTO, cryptoCounts)
+			require.Equalf(t, int(fb.MinPING), minPings,
+				"in %d dials the fewest PING frames any Initial carried was %d and this dial's spec declares a floor of %d: PING frames never merge on the wire, so a floor that is never reached means MinPING is not what the packer drew from — %v",
+				tc.dials, minPings, fb.MinPING, pingCounts)
+			require.Equalf(t, int(fb.MaxPING), maxPings,
+				"in %d dials the most PING frames any Initial carried was %d and this dial's spec declares a ceiling of %d: MaxPING has stopped reaching the packer, so every Initial this profile sends carries a PING count the document never declared — %v",
+				tc.dials, maxPings, fb.MaxPING, pingCounts)
+			require.Greaterf(t, maxRuns, int(fb.MinPADDING),
+				"in %d dials no Initial carried MORE than %d PADDING run(s) although this dial's spec declares up to %d: an Initial can never carry more runs than the frames the builder emitted, so the count is pinned at MinPADDING and MaxPADDING never reaches the packer — %v",
+				tc.dials, fb.MinPADDING, fb.MaxPADDING, runCounts)
+			require.GreaterOrEqualf(t, atOrBelowMinPADDING, minDialsAtOrBelowMinPADDING,
+				"in %d dials only %d Initial(s) carried as few as %d PADDING run(s) (at least %d expected; the real builder produced 28 or more in 30 measured trials, a builder pinned at MaxPADDING never more than 2) although this dial's spec declares a floor of %d: the count is pinned at MaxPADDING and MinPADDING never reaches the packer — %v",
+				tc.dials, atOrBelowMinPADDING, fb.MinPADDING, minDialsAtOrBelowMinPADDING, fb.MinPADDING, runCounts)
 		})
 	}
 }
