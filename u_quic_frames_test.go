@@ -10,6 +10,7 @@ package quic
 
 import (
 	"bytes"
+	"fmt"
 	"testing"
 
 	"github.com/Berserk-Automation-Hub/quic-go-utls/quicvarint"
@@ -329,4 +330,83 @@ func splitFrames(t *testing.T, b []byte) []builtFrame {
 		inPad = false
 	}
 	return out
+}
+
+// TestUQUICRandomFramesHonoursTheDeclaredFrameBounds is the guard for the four spec fields the
+// builder reads and nothing else in this fork asserted: MinCRYPTO/MaxCRYPTO and
+// MinPADDING/MaxPADDING.
+//
+// WHY IT EXISTS. Every other test here drives ONE builder value (1,3,3,8,2,6), so a builder that
+// stopped reading the spec and used CONSTANTS inside that value's range stayed green everywhere.
+// Measured, on this machine, one factor at a time:
+//
+//	randUint64(uint64(q.MinCRYPTO), uint64(q.MaxCRYPTO)) -> randUint64(3, 3)
+//	randUint64(uint64(q.MinPADDING), uint64(q.MaxPADDING)) -> randUint64(2, 2)
+//	  => ok  github.com/Berserk-Automation-Hub/quic-go-utls  17.962s   (the WHOLE package)
+//
+// Under that mutation every Initial carries exactly 3 CRYPTO frames and 2 PADDING runs whatever the
+// profile declares — chrome-152.json declares 4..17 and 3..8 — i.e. the chaos layout collapses to a
+// CONSTANT shape, which is precisely the tell this file exists to remove. That is the same defect
+// class as E5/E6: a profile value quietly stops being read.
+//
+// So this drives TWO bound sets that share no value, and requires the emitted counts to track EACH.
+// A constant cannot satisfy both.
+//
+// ON THE PADDING LOWER BOUND. The builder emits numPADDING separate PADDING frames and then shuffles
+// them in among the CRYPTO and PING frames. Two PADDING frames that land side by side read back off
+// the wire as ONE run, because QUIC's PADDING frame is a single zero byte and a reader cannot tell
+// four of them in one frame from four one-byte frames. The per-build UPPER bound is therefore exact
+// (runs <= frames emitted <= MaxPADDING) while the lower bound is only reachable across builds, so
+// it is asserted as "the largest run count seen in n builds is at least MinPADDING". Both halves go
+// red under the mutation above.
+func TestUQUICRandomFramesHonoursTheDeclaredFrameBounds(t *testing.T) {
+	for _, q := range []QUICRandomFrames{
+		{MinPING: 1, MaxPING: 1, MinCRYPTO: 2, MaxCRYPTO: 2, MinPADDING: 1, MaxPADDING: 1},
+		{MinPING: 4, MaxPING: 7, MinCRYPTO: 6, MaxCRYPTO: 12, MinPADDING: 4, MaxPADDING: 9},
+	} {
+		t.Run(fmt.Sprintf("CRYPTO %d..%d PING %d..%d PADDING %d..%d", q.MinCRYPTO, q.MaxCRYPTO, q.MinPING, q.MaxPING, q.MinPADDING, q.MaxPADDING), func(t *testing.T) {
+			chunks := testChunks()
+			require.LessOrEqualf(t, len(chunks), int(q.MinCRYPTO),
+				"this bound set asks for fewer CRYPTO frames (%d) than the %d chunks handed in; the builder cannot merge chunks, so the lower bound below would be unsatisfiable by construction rather than by the spec",
+				q.MinCRYPTO, len(chunks))
+
+			const n = 120
+			cryptoCounts := map[int]int{}
+			maxRuns := 0
+			for i := 0; i < n; i++ {
+				out, err := q.Build(chunks, 1215)
+				require.NoError(t, err)
+				pf := parseInitialPayload(t, out)
+
+				require.GreaterOrEqualf(t, len(pf.crypto), int(q.MinCRYPTO),
+					"the payload carries %d CRYPTO frame(s) and the spec declares at least %d: the CRYPTO split is not being driven by the spec's bounds, so every Initial this profile sends has a layout the document never declared",
+					len(pf.crypto), q.MinCRYPTO)
+				require.LessOrEqualf(t, len(pf.crypto), int(q.MaxCRYPTO),
+					"the payload carries %d CRYPTO frame(s) and the spec declares at most %d: the CRYPTO split is not being driven by the spec's bounds",
+					len(pf.crypto), q.MaxCRYPTO)
+				require.GreaterOrEqualf(t, pf.pings, int(q.MinPING),
+					"the payload carries %d PING frame(s), the spec declares at least %d", pf.pings, q.MinPING)
+				require.LessOrEqualf(t, pf.pings, int(q.MaxPING),
+					"the payload carries %d PING frame(s), the spec declares at most %d", pf.pings, q.MaxPING)
+				require.LessOrEqualf(t, pf.runs, int(q.MaxPADDING),
+					"the payload carries %d PADDING run(s) and the spec declares at most %d: the PADDING count is not being driven by the spec's bounds",
+					pf.runs, q.MaxPADDING)
+				require.Positivef(t, pf.runs, "the payload carries no PADDING at all; the spec declares at least %d run(s)", q.MinPADDING)
+
+				cryptoCounts[len(pf.crypto)]++
+				if pf.runs > maxRuns {
+					maxRuns = pf.runs
+				}
+			}
+
+			require.GreaterOrEqualf(t, maxRuns, int(q.MinPADDING),
+				"in %d builds the most PADDING runs any payload carried was %d, and the spec declares at least %d: the PADDING count is pinned below what this profile declares, so the Initial's padding shape is a constant rather than the document's",
+				n, maxRuns, q.MinPADDING)
+			if q.MinCRYPTO != q.MaxCRYPTO {
+				require.Greaterf(t, len(cryptoCounts), 1,
+					"in %d builds the CRYPTO-frame count was always %v although the spec declares a range of %d..%d: the count is a constant inside the range, so half the declaration is not being read",
+					n, cryptoCounts, q.MinCRYPTO, q.MaxCRYPTO)
+			}
+		})
+	}
 }

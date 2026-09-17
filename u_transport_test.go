@@ -343,6 +343,102 @@ func TestUTransportPinsWhateverFirstPacketNumberTheSpecAsks(t *testing.T) {
 	}
 }
 
+// TestUTransportInitialFrameCountsComeFromTheSpecsBounds is the SHIPPED-PATH half of the frame-bound
+// guard (the builder-level half is TestUQUICRandomFramesHonoursTheDeclaredFrameBounds): the CRYPTO
+// and PADDING counts on an Initial that really left a socket track the bounds THIS dial's spec
+// declares, and not a constant compiled into the builder.
+//
+// It is here for the same reason TestUTransportPinsWhateverFirstPacketNumberTheSpecAsks is: with one
+// bound set in play everywhere, replacing the builder's two spec reads with constants inside that
+// set's range left the entire package green. Two sets that share no value cannot both be satisfied
+// by a constant, and reading the counts off the DECRYPTED datagram proves the spec reached the
+// packer rather than only the builder's own unit test.
+//
+// The per-dial PADDING assertion is an UPPER bound only, deliberately: the builder's PADDING frames
+// are shuffled in among the CRYPTO and PING frames and two that land side by side read back as one
+// run, so a lower bound on a single connection fails about one dial in twelve (measured; §7, "One
+// assertion REMOVED"). The lower bound is asserted across 120 builds in the builder test instead.
+func TestUTransportInitialFrameCountsComeFromTheSpecsBounds(t *testing.T) {
+	// MinCRYPTO is >= 3 in both sets because quic-go's initial crypto stream hands the builder three
+	// CRYPTO chunks for this ClientHello (measured, 5/5 dials) and the builder can only SPLIT them,
+	// never merge — so a set asking for fewer would be unsatisfiable by construction rather than by
+	// the spec. Neither set contains 3, which is the count the constant-mutation produces.
+	for _, fb := range []QUICRandomFrames{
+		{MinPING: 1, MaxPING: 1, MinCRYPTO: 4, MaxCRYPTO: 5, MinPADDING: 1, MaxPADDING: 1},
+		{MinPING: 4, MaxPING: 7, MinCRYPTO: 9, MaxCRYPTO: 12, MinPADDING: 3, MaxPADDING: 6},
+	} {
+		t.Run(fmt.Sprintf("CRYPTO %d..%d PING %d..%d PADDING %d..%d", fb.MinCRYPTO, fb.MaxCRYPTO, fb.MinPING, fb.MaxPING, fb.MinPADDING, fb.MaxPADDING), func(t *testing.T) {
+			spec := uTestSpec()
+			spec.InitialPacketSpec.FrameBuilder = &fb
+			datagrams := uDialIntoTheVoid(t, spec, uTestQUICConfig())
+			_, payload := uDecryptInitial(t, datagrams[0])
+			pf := parseInitialPayload(t, payload)
+
+			require.GreaterOrEqualf(t, len(pf.crypto), int(fb.MinCRYPTO),
+				"the Initial on the wire carries %d CRYPTO frame(s) and this dial's spec declares at least %d: the layout that left the socket is not the one the profile declared",
+				len(pf.crypto), fb.MinCRYPTO)
+			require.LessOrEqualf(t, len(pf.crypto), int(fb.MaxCRYPTO),
+				"the Initial on the wire carries %d CRYPTO frame(s) and this dial's spec declares at most %d: the layout that left the socket is not the one the profile declared",
+				len(pf.crypto), fb.MaxCRYPTO)
+			require.GreaterOrEqualf(t, pf.pings, int(fb.MinPING),
+				"the Initial on the wire carries %d PING frame(s), this dial's spec declares at least %d", pf.pings, fb.MinPING)
+			require.LessOrEqualf(t, pf.pings, int(fb.MaxPING),
+				"the Initial on the wire carries %d PING frame(s), this dial's spec declares at most %d", pf.pings, fb.MaxPING)
+			require.Positivef(t, pf.runs, "the Initial on the wire carries no PADDING; this dial's spec declares %d..%d runs", fb.MinPADDING, fb.MaxPADDING)
+			require.LessOrEqualf(t, pf.runs, int(fb.MaxPADDING),
+				"the Initial on the wire carries %d PADDING run(s) and this dial's spec declares at most %d", pf.runs, fb.MaxPADDING)
+		})
+	}
+}
+
+// TestUTransportRejectsAPacketNumberLengthNoLongHeaderCanCarry: RFC 9000 §17.2 gives the
+// packet-number length a two-bit field, so 1..4 are the only widths that exist. This is the analogue
+// of E22/E23 for the OTHER header field the spec pins, and the two out-of-range directions fail
+// differently, which is why both are here:
+//
+//   - n > 4 does reach the wire writer, and upstream stops it — but as
+//     `INTERNAL_ERROR (local): invalid packet number length: 5`, a connection-level error raised
+//     three frames below any code that knows the word "profile", after the dial has started and
+//     with the field that is wrong named nowhere. A failure that merely differs is not a guard (C1).
+//   - n < 0 is not caught at all. The packer's pin is `n > 0 && …`, so a negative width reads as
+//     "absent", the dial goes ahead, and the client sends a packet-number width its document never
+//     declared — HR-6's silent substitution, exactly.
+//
+// Both are now refused where the document enters the library, with the field named.
+func TestUTransportRejectsAPacketNumberLengthNoLongHeaderCanCarry(t *testing.T) {
+	cli, err := net.ListenUDP("udp4", &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 0})
+	require.NoError(t, err)
+	defer cli.Close()
+	addr := &net.UDPAddr{IP: net.IPv4(127, 0, 0, 1), Port: 1}
+
+	for _, n := range []int{5, 255, -1} {
+		t.Run(fmt.Sprintf("InitPacketNumberLength %d", n), func(t *testing.T) {
+			spec := uTestSpec()
+			spec.InitialPacketSpec.InitPacketNumberLength = n
+			tr := &UTransport{Transport: &Transport{Conn: cli}, QUICSpec: spec}
+			ctx, cancel := context.WithTimeout(context.Background(), 300*time.Millisecond)
+			defer cancel()
+			_, err := tr.DialEarly(ctx, addr, uTestTLSConfig(), uTestQUICConfig())
+			require.EqualErrorf(t, err,
+				fmt.Sprintf("quic u-layer: InitPacketNumberLength %d is outside the RFC 9000 §17.2 range 1..4 (0 means \"let quic-go choose\")", n),
+				"a profile declaring a %d-byte packet-number field was accepted; the long header has two bits for it, so whatever went on the wire is not what the document asked for", n)
+		})
+	}
+
+	// Positive control: ZERO is not "wrong", it is the documented "let quic-go choose", and it must
+	// still dial. Without this the three assertions above would also pass if dialSpec refused every
+	// value.
+	t.Run("zero still dials and lets quic-go choose the width", func(t *testing.T) {
+		spec := uTestSpec()
+		spec.InitialPacketSpec.InitPacketNumberLength = 0
+		datagrams := uDialIntoTheVoid(t, spec, uTestQUICConfig())
+		extHdr, _ := uDecryptInitial(t, datagrams[0])
+		require.GreaterOrEqualf(t, int(extHdr.PacketNumberLen), 2,
+			"a spec declaring no packet-number length produced a %d-byte field; upstream quic-go emits only 2 or 4, so the pin fired for a profile that never asked for one",
+			extHdr.PacketNumberLen)
+	})
+}
+
 // TestUTransportRefusesASpecThisTransportCannotHonour: Transport.init caches ONE connection-ID
 // generator for the life of the Transport, so the Source Connection ID length is decided once and
 // every later dial on that Transport inherits it. A dial whose spec pins a different length cannot

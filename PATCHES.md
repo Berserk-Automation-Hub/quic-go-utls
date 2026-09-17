@@ -193,13 +193,16 @@ reaches when Sightglass drives it.
 | `u_quic_spec.go` | 0.0% (0/12) | **91.7%** (11/12) | 41.7% (5/12) |
 | `u_connection.go` | 0.0% (0/63) | **87.3%** (55/63) | 76.2% (48/63) |
 | `u_quic_frames.go` | 0.0% (0/100) | **85.0%** (85/100) | 77.0% (77/100) |
-| `u_transport.go` | 0.0% (0/85) | **88.9%** (80/90) | 74.4% (67/90) |
-| `u_packet_packer.go` | 0.0% (0/84) | **75.0%** (63/84) | 72.6% (61/84) |
-| **u-layer total** | **0.0% (0/402)** | **86.2% (350/406)** | **75.4% (306/406)** |
+| `u_transport.go` | 0.0% (0/85) | **89.1%** (82/92) | SHIPPED_UT |
+| `u_packet_packer.go` | 0.0% (0/84) | **75.6%** (62/82) | SHIPPED_UPP |
+| **u-layer total** | **0.0% (0/402)** | **86.5% (351/406)** | **SHIPPED_TOT** |
 
 (402 -> 406 statements: `QUICSpec.UDPDatagramMinSize` and `UTransport.Dial` were deleted, the
 `uDialsEarly` branch in `uDoDial` was added (§5), and the post-`init` connection-ID agreement check
-this round added two more — E3c/E26 below. Its `if` executes on the shipped path (`u_transport.go:91`
+added two more — E3c/E26 below. The total is unchanged this round because the two statements the
+`InitPacketNumberLength` range check adds to `u_transport.go` are the two the now-unreachable `n > 4`
+branch removes from `u_packet_packer.go` (E31); the covered count moved 350 -> 351 because the new
+check's `if` and its `return` are both exercised while the deleted branch had one of each. Its `if` executes on the shipped path (`u_transport.go:91`
 is `1` in the shipped-path profile) and its refusal branch does not, which is the intended shape: no
 Sightglass session sets `Transport.ConnectionIDLength` or `ConnectionIDGenerator`, and every session
 builds its own `Transport` (`go/quich3/h3client.go:613`).)
@@ -258,11 +261,37 @@ all**. `internal/protocol/params.go` is back to upstream's two `const`s, and
 | `> 0` | raise the buffer to exactly this — the value the profile declares. |
 | `UDoNotSetSocketBuffer` | the profile declares **no** socket buffer: issue no `setsockopt` at all and leave the kernel default standing. Sightglass expresses the two profile fields as `*int`, and substituting quic-go's 7 MB for an absent value would invent a fingerprint nobody measured (HR-6). |
 
-`TestUTransportSocketBuffersAreNotProcessGlobal` initialises two Transports with different targets
-concurrently and reads both sockets back with `getsockopt`; it cannot pass while one global exists.
-It carries its own vacuity checks — it refuses to run if the two sessions ask for the same sizes, or
-if either target is below this host's default (quic-go only ever RAISES a buffer, so a target below
-the OS default would measure the kernel instead of the Transport).
+Three tests hold that, and the first sentence this section used to carry about them was FALSE by
+experiment, so it is recorded here rather than quietly rewritten. It said
+`TestUTransportSocketBuffersAreNotProcessGlobal` "cannot pass while one global exists". It can.
+Reintroducing this fork's old shape verbatim in `sys_conn.go` —
+
+```go
+var uGlobalWantReceive, uGlobalWantSend int
+func SetDesiredBufferSizes(receive, send int) { uGlobalWantReceive, uGlobalWantSend = receive, send }
+func wrapConnWithBuffers(pc net.PacketConn, wantReceive, wantSend int) (rawConn, error) {
+	SetDesiredBufferSizes(wantReceive, wantSend)
+	wantReceive, wantSend = uGlobalWantReceive, uGlobalWantSend
+```
+
+— leaves `go test . -run TestUTransportSocketBuffers -count=10` at `ok … 0.375s` and `go test .
+-count=1` at `ok … 17.847s`: the exported process-global setter is back and the whole package is
+green. It goes red only under `-race`, and then as a DATA RACE report rather than as a leaked value,
+and no suite here runs `-race`. The reason is structural: when a global is written and read inside
+one call, the two goroutines serialise in practice and the window never opens.
+
+So there are now three guards, and each one is red under a mutation the others miss:
+
+| guard | what it makes impossible | the mutation it catches |
+|---|---|---|
+| `TestUTransportSocketBufferPathHasNoPackageLevelState` | package-level state on the buffer path AT ALL. It parses the package and applies three rules: no numeric package-level `var` declared in `sys_conn.go` / `sys_conn_buffers*.go` / `u_conn_buffers.go`; no function on the path assigns to a package-level var; none reads one, except `setBufferWarningOnce` (a `sync.Once` that carries no per-session value). | the declare-then-read shape above, deterministically, with the offending variable named |
+| `TestUTransportSocketBuffersCannotBeObservedByAnotherSession` | one session's target reaching another session's socket. It parks session 0 INSIDE its `SO_RCVBUF` setsockopt with a `net.UDPConn` wrapper whose `SetReadBuffer` blocks, lets session 1 declare and apply different targets start to finish, then releases session 0 into its `SO_SNDBUF`. | a global read at each USE (`setSendBufferTo(pc, uGlobalWantSend)`) — deterministically, as a leaked VALUE: `session 0's socket has SO_SNDBUF 262144; its own call asked for 131072 and session 1 asked for 262144` |
+| `TestUTransportSocketBuffersAreNotProcessGlobal` | two concurrent `Transport.init`s wearing each other's sizes | the same read-at-use shape (`session 1's socket has SO_SNDBUF 131072 but its own Transport asked for 262144: the other session's value leaked across`), and the declare-then-read shape **only under `-race`** |
+
+All three carry vacuity checks — they refuse to run if the two sessions ask for the same sizes, if
+either target is below this host's default (quic-go only ever RAISES a buffer, so a target below the
+OS default would measure the kernel instead of the Transport), if the parser found no package-level
+vars or no buffer-path functions at all, or if the barrier never fired.
 `TestUTransportSocketBuffersAbsentIssuesNoSetsockoptAtAll` covers the third state: it proves that
 absence issues no `setsockopt` AT ALL rather than one the getsockopt reader cannot distinguish from
 the kernel default (see §7, E2b). A third, compile-time guard sits in the same file:
@@ -288,6 +317,13 @@ If either is ever turned back into a `var`, the package stops compiling.
   `initialPaddingLen` to the same size. A caller setting it believed it was pinning the datagram
   size while the value went nowhere; a profile field the library silently ignores is worse than no
   field at all. Deleted rather than documented.
+
+* The `if n > 4 { return … }` inside `packSpecInitialPacket` — **deleted this round.** The 1..4 range
+  is now checked in `dialSpec`, where the document enters the library and the error can name the
+  field (E31), and the only route to that packer is
+  `dialSpec -> uDoDial -> newUClientConnection -> newUPacketPacker`, so the second check was a branch
+  no caller could take. Shipping it as belt and braces would be exactly the unreachable code C2
+  forbids; the coverage profile agreed (`u_packet_packer.go` 84 -> 82 statements).
 
 * `UTransport.Dial`, and the `use0RTT` parameter that existed to vary — **deleted this round.** Its
   only callers were this package's own tests. Sightglass constructs a `UTransport` in exactly two
@@ -362,9 +398,18 @@ comparable. Packet timing (pacing, ACK cadence, PMTU probing, retransmit timing)
 
 ## 7. Ablation record
 
-"A guard I have not broken is not a guard." Each of the **35** elements below was reverted **on its
-own**, the named test was run, and the exact failure text recorded. All were then restored
+"A guard I have not broken is not a guard." Each of the **41** rows below is one mutation, applied
+**on its own**, with the named test run and the exact failure text recorded. All were then restored
 (`git status --short` clean of every ablation file afterwards).
+
+**A third certification sweep found two more elements green** and one guarded element missing from
+the table, so the table moved 35 rows -> 41 (E30a/E30b — the frame builder's CRYPTO and PADDING
+bounds; E31 — the `InitPacketNumberLength` range check; E32 — the packer's "first Initial only"
+condition, which WAS guarded and had no row; E2d/E2e — the two shapes a reintroduced socket-buffer
+global takes, §4). That is the third time an attack on this table found something, and it is the reason the
+"Element with no guard" section below now states a NUMBER instead of an absolute: the honest claim is
+not "everything is guarded", it is "everything anyone has attacked so far is guarded, and here is
+what was attacked".
 
 Three things about this table that were not true of the one it replaces:
 
@@ -426,6 +471,12 @@ Three things about this table that were not true of the one it replaces:
 | E27 | `uGenerateDestConnID`'s "the profile declares no length" branch: `generateConnectionIDForInitial()` -> `protocol.GenerateConnectionID(8)`, a CONSTANT length inside the legal range | `TestUSpecDestConnIDLengthZeroKeepsTheUpstreamRandomLength` | `a spec declaring no DestConnIDLength produced only 1 distinct length(s) in 512 dials (map[8:512]): upstream draws the first-flight DCID length uniformly from [8,20], and a client that always picks one of them is telling on itself in the length field` |
 | E28 | the frame builder's reserve in the packer: `reserve := protocol.ByteCount(fb.MaxOverhead())` -> `0` | `TestUTransportKeepsTheSpecLayoutWhenTheClientHelloFillsThePacket` | `the saturated Initial carries no PADDING at all (2 CRYPTO frame(s), 1 PING(s)): the packer reserved nothing for the frame builder, so the layout the spec declares — 2..6 PADDING runs — could not be applied and upstream's shape went out instead` |
 | E29 | `useSpecInitial`'s `!onlyAck`: the spec layout runs even when the connection asked for an ACK-only packet | `TestUPacketPackerLeavesAnAckOnlyInitialToUpstream` | `the ACK-only Initial carries 3 frame(s): the connection asked for an ACK and the spec layout sent the pending ClientHello instead, in a window the congestion controller had closed` |
+| E2d | the structural buffer guard: reintroduce `var uGlobalWantReceive, uGlobalWantSend int` + exported `SetDesiredBufferSizes` in `sys_conn.go`, read by `wrapConnWithBuffers` (§4) | `TestUTransportSocketBufferPathHasNoPackageLevelState` | `sys_conn.go declares a package-level var uGlobalWantReceive int: a socket-buffer target in package state is shared by every session in the process, which is the cross-identity bleed C6 forbids; it belongs on the Transport that owns the socket` (and 6 more: two declarations, four reads/assignments, each with file:line) |
+| E2e | the same global, but read at each USE (`setSendBufferTo(pc, uGlobalWantSend)`) | `TestUTransportSocketBuffersCannotBeObservedByAnotherSession`, `…AreNotProcessGlobal` | `session 0's socket has SO_SNDBUF 262144; its own call asked for 131072 and session 1 asked for 262144. Session 1 ran to completion while session 0 was suspended between its two setsockopts, so a target that is not session 0's own can only have arrived through state the two sessions share` |
+| E30a | the frame builder's CRYPTO bound: `randUint64(uint64(q.MinCRYPTO), uint64(q.MaxCRYPTO))` -> `randUint64(3, 3)` — a constant inside the one bound set every other test drove | `TestUQUICRandomFramesHonoursTheDeclaredFrameBounds/*` (2/2), `TestUTransportInitialFrameCountsComeFromTheSpecsBounds/*` (2/2, on the wire) | `the payload carries 3 CRYPTO frame(s) and the spec declares at most 2: the CRYPTO split is not being driven by the spec's bounds` / `the payload carries 3 CRYPTO frame(s) and the spec declares at least 6: …so every Initial this profile sends has a layout the document never declared` / on the wire: `the Initial on the wire carries 3 CRYPTO frame(s) and this dial's spec declares at least 9: the layout that left the socket is not the one the profile declared` |
+| E30b | the frame builder's PADDING bound: `randUint64(uint64(q.MinPADDING), uint64(q.MaxPADDING))` -> `randUint64(2, 2)`. A third mutation was run for `MaxCRYPTO` alone (`randUint64(Min, Min)`) | `TestUQUICRandomFramesHonoursTheDeclaredFrameBounds/*` (2/2) | `the payload carries 2 PADDING run(s) and the spec declares at most 1: the PADDING count is not being driven by the spec's bounds` / `in 120 builds the most PADDING runs any payload carried was 2, and the spec declares at least 4: the PADDING count is pinned below what this profile declares, so the Initial's padding shape is a constant rather than the document's` / (Max-only) `in 120 builds the CRYPTO-frame count was always map[6:120] although the spec declares a range of 6..12: the count is a constant inside the range, so half the declaration is not being read` |
+| E31 | the `InitPacketNumberLength` 1..4 range check in `dialSpec` | `TestUTransportRejectsAPacketNumberLengthNoLongHeaderCanCarry/*` (3/3) | `expected: "quic u-layer: InitPacketNumberLength 5 is outside the RFC 9000 §17.2 range 1..4 (0 means \"let quic-go choose\")" / actual: "INTERNAL_ERROR (local): invalid packet number length: 5"` and, for `-1`, `actual: "context deadline exceeded"` — the dial went ahead |
+| E32 | the packer's `&& uint64(hdr.PacketNumber) == p.uSpec.InitialPacketSpec.InitPacketNumber`, i.e. the pn-length pin applied to EVERY Initial rather than the first | `TestUTransportSecondInitialKeepsUpstreamPacketNumberLength` | `the second Initial also uses a 1-byte packet-number field; the spec pins only the first` (`Should not be: 0x1`) |
 
 ### E24 is here because the reverse attack worked TWICE
 
@@ -577,12 +628,79 @@ on the initial stream, and requires the ACK-only packet to carry no frames. It s
 control in the same file (`onlyAck=false`, same state, the spec layout DOES run and fills the packet
 to exactly `Config.InitialPacketSize`), so the assertion cannot pass by the packer doing nothing.
 
+### Four more the THIRD sweep found — two green elements, one missing row, one false sentence
+
+The same method, turned on this table a third time by a certifier. It is worth recording what it
+found, because the pattern is now consistent: **the unguarded element is always the one where every
+test in the tree drives a single value.**
+
+**E30a/E30b — the frame builder's CRYPTO and PADDING bounds did not have to come from the profile.**
+Every test in this fork drove ONE builder value (`MinPING 1, MaxPING 3, MinCRYPTO 3, MaxCRYPTO 8,
+MinPADDING 2, MaxPADDING 6` — `u_quic_frames_test.go`, `u_transport_test.go`, `u_packet_packer_test.go`).
+Replacing the two spec reads in `Build` with CONSTANTS INSIDE that range —
+
+```go
+randUint64(uint64(q.MinCRYPTO), uint64(q.MaxCRYPTO))   -> randUint64(3, 3)
+randUint64(uint64(q.MinPADDING), uint64(q.MaxPADDING)) -> randUint64(2, 2)
+```
+
+— left the whole root package green (`ok … 17.962s`). Under it, every Initial carries exactly 3
+CRYPTO frames and 2 PADDING runs no matter what the document says, i.e. the chaos layout — the one
+thing this file exists to produce — collapses to a CONSTANT shape. Four of the six profile fields
+that reach the builder stop being read. Nothing anywhere noticed: the old
+`TestUQUICRandomFramesEmitsTheChaosShape` bounds the PING count against the spec but nothing bounded
+the CRYPTO-frame count or the PADDING-run count against it at all. Same defect class as E5/E6.
+
+The fix is the same shape as E3a's and E5/E6's: drive TWO bound sets that share no value, at the
+builder (`TestUQUICRandomFramesHonoursTheDeclaredFrameBounds`, 120 builds each) and on the wire
+through a real `DialEarly` (`TestUTransportInitialFrameCountsComeFromTheSpecsBounds`). One honest
+limitation is documented in both: the per-build PADDING-run count has an exact UPPER bound
+(runs <= frames emitted <= `MaxPADDING`) but its lower bound is only reachable across builds, because
+the builder shuffles its PADDING frames in among the others and two that land side by side read back
+off the wire as one run — QUIC's PADDING frame is a single zero byte and no reader can tell four in
+one frame from four one-byte frames. So the lower bound is asserted as "the largest run count in 120
+builds is at least `MinPADDING`", which is what goes red under E30b's second failure.
+
+**E31 — `InitPacketNumberLength` had no range check that could name the field.** The two directions
+failed differently, and neither was a guard:
+
+* `n > 4` did reach the wire writer and upstream stopped it, but as
+  `INTERNAL_ERROR (local): invalid packet number length: 5` — a connection-level error from inside
+  `wire`, after the dial had started, with the profile field named nowhere. A failure that merely
+  differs is not a guard (C1).
+* `n < 0` was not caught at all. The packer's pin reads `n > 0 && …`, so a negative width was treated
+  as "absent", the dial went ahead, and the client sent a packet-number width its document never
+  declared — HR-6's silent substitution.
+
+Both are now refused in `dialSpec`, where the document enters the library and the error can name the
+field, exactly like E22/E23 for the two connection-ID lengths. The old `if n > 4` inside
+`packSpecInitialPacket` is DELETED rather than kept as belt and braces: the only route to that packer
+is `dialSpec -> uDoDial -> newUClientConnection -> newUPacketPacker`, so a second check there is a
+branch no caller can take, and shipping one would be C2's dead code.
+
+**E32 — an element that WAS guarded and had no row.** The packer confines the packet-number-length
+pin to the FIRST Initial (`n > 0 && uint64(hdr.PacketNumber) == …InitPacketNumber`), because the
+capture shows the second packet of the flight using a 2-byte field. Dropping the condition is red —
+`the second Initial also uses a 1-byte packet-number field; the spec pins only the first`,
+`TestUTransportSecondInitialKeepsUpstreamPacketNumberLength` — but the table had no row for it, so
+the table's "each distinct element" claim was not true. It has one now.
+
+**And one sentence in §4 was false by experiment** — see §4 for the reintroduced global that left
+`TestUTransportSocketBuffersAreNotProcessGlobal` passing 10/10, and the two guards added because of
+it (E2d, E2e).
+
 ### Element with no guard
 
-**One element, and it is not code.** Every element of the u-layer itself has been turned red by a
-mutation on this machine: the four a certifier turned green against the previous revision of this
-table (E24 ii/iii, E5 ii, E6 ii, E3c/E26) and the three we then found ourselves (E27, E28, E29). The
-single exception:
+**One, as of this sweep — and the honest form of that claim is a NUMBER, not an absolute.** Three
+successive attacks on this table have each found something (four elements in the first, three in the
+second, three plus a missing row and a false sentence in the third), so "every element is guarded"
+is a claim this document has been wrong about twice and will not make again. What it says instead is:
+every element ANYONE HAS ATTACKED is guarded, every attack is in the table with its failure text, and
+the one element with no possible test is named below.
+
+Counting from the table: the four a certifier turned green against the first revision (E24 ii/iii,
+E5 ii, E6 ii, E3c/E26), the three we then found ourselves (E27, E28, E29), and the three the third
+sweep found (E30a, E30b, E31) are all red now. One element has no test that can go red:
 
 The **fhttp pin alignment** (§8) has no test that can go red, and that is not an oversight. Go's
 minimal-version selection means a consumer that requires a newer fhttp gets the newer one regardless
@@ -659,6 +777,19 @@ packages failing                                                    1           
 `*` one `./...` run of this fork reported `integrationtests/versionnegotiation` failing on a
 wall-clock assertion while the machine was loaded; it passes 3/3 quiet, as does pristine's. §9.3.
 
+**REGRESSION DIFF FOR THIS ROUND'S CHANGES.** `go test ./... -count=1 -timeout 900s` at the base of
+this round and again with every change in this section applied, same machine, nothing cached
+(`grep -c '(cached)'` = 0):
+
+```
+                                   before this round   after this round
+packages failing                                   0                  0
+NEW failures                                       —               none
+```
+
+The full listing of the "after" run is 26 `ok` lines and no `FAIL` line, `integrationtests/self`
+included (`ok … 13.178s`). The three load-sensitive upstream flakes in §9.3 did not fire in it.
+
 **NEW failures introduced by this patch: none.** Every test that fails here also fails, or cannot
 run at all, in pristine.
 
@@ -681,6 +812,26 @@ this fork, integrationtests/versionnegotiation
   the same package, -count=1 x3 quiet                          3/3 ok
 pristine, same package, -count=1 x3                            3/3 ok
 ```
+
+A THIRD member of the same class was found by a certifier, not by us, and it is listed because the
+previous revision of this section presented its list as complete when it was only the part we had
+hit:
+
+```
+this fork, integrationtests/self
+  in a certifier's full ./... run  1 failure  TestHTTPReestablishConnectionAfterDialError (5.01s)
+                                   http_test.go:575 Get "https://localhost:59127/hello":
+                                   timeout: no recent network activity
+  the same package in isolation, that certifier                1 x ok  0.507s
+  our own full ./... run after this round's changes            ok  13.178s (0 failures, 0 cached)
+```
+
+`TestHTTPReestablishConnectionAfterDialError` is upstream's test in upstream's package; it waits for
+a connection to be re-established within a wall-clock budget and misses it when the machine is busy,
+the same shape as the two above. Nothing this patch changes is on its path. The honest statement is
+that this section lists the load-sensitive failures ANYONE has observed on this machine, and that a
+`./...` run of this fork has now come back clean twice with the list non-empty — not that the list is
+closed.
 
 `TestVersionNegotiationFailure` asserts that a failed version negotiation completes in under 2
 seconds of WALL CLOCK; it is upstream's test, in a package this patch does not touch, and it fails

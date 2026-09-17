@@ -82,10 +82,11 @@ func (p *uPacketPacker) packSpecInitialPacket(maxSize protocol.ByteCount, now mo
 	// number (PacketNumberLengthForHeader returns 2 or 4); the browser does. Ground truth from the
 	// oracle pcap for the two-packet ClientHello flight: pn=1 pnLen=1 (payload 1215 B) then
 	// pn=2 pnLen=2 (payload 1214 B) — so pinning only the first packet reproduces BOTH.
+	// The 1..4 range is checked in dialSpec, where the profile enters the library and the error can
+	// name the field; it is not re-checked here, because the only way to reach this packer is
+	// UTransport.dialSpec -> uDoDial -> newUClientConnection -> newUPacketPacker, so a second check
+	// would be a branch no caller can take.
 	if n := p.uSpec.InitialPacketSpec.InitPacketNumberLength; n > 0 && uint64(hdr.PacketNumber) == p.uSpec.InitialPacketSpec.InitPacketNumber {
-		if n > 4 {
-			return nil, fmt.Errorf("quic u-layer: InitPacketNumberLength %d out of range 1..4", n)
-		}
 		hdr.PacketNumberLen = protocol.PacketNumberLen(n)
 	}
 

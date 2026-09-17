@@ -59,6 +59,17 @@ func (t *UTransport) dialSpec(ctx context.Context, addr net.Addr, host string, t
 	if l := t.QUICSpec.InitialPacketSpec.SrcConnIDLength; l < 0 || l > protocol.MaxConnIDLen {
 		return nil, fmt.Errorf("quic u-layer: SrcConnIDLength %d is outside the RFC 9000 §17.2 range 0..%d", l, protocol.MaxConnIDLen)
 	}
+	// RFC 9000 §17.2 gives the packet-number length a TWO-BIT field in the long header, so the only
+	// on-wire widths that exist are 1..4 bytes. Anything else is a malformed profile, and it has to
+	// be refused where the document enters the library: protocol.PacketNumberLen(n) is written
+	// straight into those two bits by hdr.Append, so a 5 would go out as a 1 and every later packet
+	// number on the connection would be decoded against a width the client never meant — silently,
+	// and with the profile field nowhere in sight. Zero keeps its documented meaning ("let quic-go
+	// choose", which never picks 1); a negative value is not "absent", it is wrong, and it used to be
+	// treated as absent.
+	if n := t.QUICSpec.InitialPacketSpec.InitPacketNumberLength; n < 0 || n > 4 {
+		return nil, fmt.Errorf("quic u-layer: InitPacketNumberLength %d is outside the RFC 9000 §17.2 range 1..4 (0 means \"let quic-go choose\")", n)
+	}
 	// The Source Connection ID length is a spec property, so it must be pinned before Transport.init
 	// caches its generator. Both halves below are load-bearing and neither can stand without the
 	// other: the length itself, and the permission to use a ZERO length — which is what a browser
