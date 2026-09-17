@@ -3,8 +3,8 @@ module github.com/Berserk-Automation-Hub/quic-go-utls
 go 1.27.0
 
 require (
-	github.com/Berserk-Automation-Hub/fhttp v0.6.9-sightglass.11
-	github.com/Berserk-Automation-Hub/utls v1.7.8-sightglass.1
+	github.com/Berserk-Automation-Hub/fhttp v0.6.9-sightglass.21
+	github.com/Berserk-Automation-Hub/utls v1.7.8-sightglass.6
 	github.com/quic-go/qpack v0.6.0
 	github.com/stretchr/testify v1.12.1
 	go.uber.org/mock v0.6.0

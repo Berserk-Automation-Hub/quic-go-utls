@@ -14,8 +14,8 @@ vendor directory; neither exists. There is also no `UQUIC_LAYER_PATCH.md` — th
 
 ```
 module  github.com/bogdanfinn/quic-go-utls  ->  github.com/Berserk-Automation-Hub/quic-go-utls
-        github.com/bogdanfinn/utls  v1.7.8-barnius  ->  .../utls  v1.7.8-sightglass.1
-        github.com/bogdanfinn/fhttp v0.6.9          ->  .../fhttp v0.6.9-sightglass.11
+        github.com/bogdanfinn/utls  v1.7.8-barnius  ->  .../utls  v1.7.8-sightglass.6
+        github.com/bogdanfinn/fhttp v0.6.9          ->  .../fhttp v0.6.9-sightglass.21
 go      1.24.1 -> 1.27.0
 ```
 
@@ -1035,19 +1035,56 @@ was re-run afterwards and still goes red on the PING assertion.
 
 ## 8. Dependency pins
 
-`go.mod` requires `github.com/Berserk-Automation-Hub/fhttp v0.6.9-sightglass.11` — the version
-`Sightglass/go/go.mod` ships. It previously said `v0.6.9-sightglass.1`, a ten-version skew, so the
-fork's own suite ran against an fhttp nobody deploys. `utls` is on `v1.7.8-sightglass.1`, which is
-also what Sightglass ships. There are no `replace` directives, here or in `Sightglass/go/go.mod`.
+`go.mod` requires `github.com/Berserk-Automation-Hub/fhttp v0.6.9-sightglass.21` and
+`github.com/Berserk-Automation-Hub/utls v1.7.8-sightglass.6` — the two versions
+`Sightglass/go/go.mod` ships. There are no `replace` directives, here or in `Sightglass/go/go.mod`.
 Checked mechanically, both sides, this round:
 
 ```
-$ grep Berserk /tmp/quic-go-utls-fork/go.mod        fhttp v0.6.9-sightglass.11
-                                                    utls  v1.7.8-sightglass.1
-$ grep Berserk Sightglass/go/go.mod                 fhttp v0.6.9-sightglass.11
-                                                    utls  v1.7.8-sightglass.1
+$ grep Berserk /tmp/quic-go-utls-fork/go.mod        fhttp v0.6.9-sightglass.21
+                                                    utls  v1.7.8-sightglass.6
+$ grep Berserk Sightglass/go/go.mod                 fhttp v0.6.9-sightglass.21
+                                                    utls  v1.7.8-sightglass.6
 $ grep -c '^replace' Sightglass/go/go.mod           0
 ```
+
+**Both pins moved in `v1.0.10-sightglass.14`, and the second one was not optional.** Up to
+`v1.0.10-sightglass.13` this file said fhttp `.11` and utls `.1` and both were true of `go.mod` —
+but `Sightglass/go/go.mod` had moved fhttp to `.21`, so this fork's own suite was running against an
+fhttp the product does not deploy. That is the harm `parity.TestForkGoModsDoNotPinOlderSiblingForks`
+names, and it reported the pair as KNOWN drift under ledger T0521 rather than as a failure. Bumping
+fhttp to `.21` forces the utls bump with it: fhttp `v0.6.9-sightglass.21`'s own `go.mod` requires
+utls `v1.7.8-sightglass.6`, so minimal version selection builds this module against utls `.6`
+whatever this file's `require` line says. Leaving `.1` written there would have been a line `go build`
+silently overrides — the exact class of untrue documentation this file exists to stop. Both entries
+for this fork are therefore gone from `knownSiblingPinDrift` in Sightglass, and T0521 is closed.
+
+**Regression diff for the two pin bumps** (`go test ./... -count=1 -timeout 900s`, same machine, no
+cached results — `grep -c '(cached)'` is 0 in all four runs):
+
+```
+                              run 1                       run 2
+before  fhttp .11 / utls .1   26 ok   0 FAIL              26 ok   0 FAIL
+after   fhttp .21 / utls .6   25 ok   1 FAIL              26 ok   0 FAIL
+```
+
+NEW failures: none that reproduce. The single failure was
+`TestMITCorruptPackets/towards_the_client` in `integrationtests/self` —
+`mitm_test.go:218: Received unexpected error: context deadline exceeded`, the subtest's own 1s
+scaled budget — and it is a FOURTH member of the load-sensitive class §9.3 already lists, measured
+rather than assumed:
+
+```
+$ go test ./integrationtests/self/ -run TestMITCorruptPackets -count=25
+after  (fhttp .21 / utls .6)   ok  15.882s   25/25
+before (fhttp .11 / utls .1)   ok  18.524s   25/25
+```
+
+The test corrupts a random byte of a randomly chosen packet (`mrand.IntN`) and then requires the
+connection to complete inside `scaleDuration(time.Second)`, in a package whose whole `./...` run
+executes beside twenty-five others. It passed 25 consecutive times on BOTH sides in isolation and the
+second full `./...` run of the after side is clean, so the failure is not a consequence of either
+pin; recording it here with both sides' numbers is the alternative to a green-suite claim.
 
 **Tag sequence, stated because the shipped-path column cannot be measured before a tag exists.**
 The shipped-path coverage figures in §3 can only be measured from the Sightglass repository AGAINST a
@@ -1057,10 +1094,14 @@ tag those numbers were taken at. `.10` through `.13` changed **no `.go` source f
 `git diff --name-only v1.0.10-sightglass.9 HEAD` lists `u_quic_frames_test.go`, `u_transport_test.go`
 and this file, and nothing else — so the shipped-path column measured at `.9` is still the column
 `.13` produces, and it was re-run from the Sightglass repository to confirm rather than assumed
-(`306/406`, with the four `u_transport.go` blocks §3 quotes reproducing exactly). `.13` is the tag
-`Sightglass/go/go.mod` consumes; `.12` is superseded by this one, which corrects three measured
-numbers in the two test files' comments and the two failure texts that quote one of them. The Go module proxy caches a tag's content immutably, so amending a
-published tag in place is never an option once it has been fetched.
+(`306/406`, with the four `u_transport.go` blocks §3 quotes reproducing exactly). `.14` is the tag
+`Sightglass/go/go.mod` consumes; `.12` is superseded by `.13`, which corrects three measured numbers
+in the two test files' comments and the two failure texts that quote one of them, and `.13` is
+superseded by `.14`, which moves the two sibling-fork pins in §8 and changes **no `.go` file at
+all** — `git diff --name-only v1.0.10-sightglass.13 HEAD` lists `go.mod`, `go.sum` and this file,
+and nothing else, so the shipped-path column measured at `.9` is still the column `.14` produces.
+The Go module proxy caches a tag's content immutably, so amending a published tag in place is never
+an option once it has been fetched.
 
 ---
 
