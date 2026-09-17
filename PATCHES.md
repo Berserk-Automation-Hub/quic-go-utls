@@ -193,16 +193,20 @@ reaches when Sightglass drives it.
 | `u_quic_spec.go` | 0.0% (0/12) | **91.7%** (11/12) | 41.7% (5/12) |
 | `u_connection.go` | 0.0% (0/63) | **87.3%** (55/63) | 76.2% (48/63) |
 | `u_quic_frames.go` | 0.0% (0/100) | **85.0%** (85/100) | 77.0% (77/100) |
-| `u_transport.go` | 0.0% (0/85) | **89.1%** (82/92) | SHIPPED_UT |
-| `u_packet_packer.go` | 0.0% (0/84) | **75.6%** (62/82) | SHIPPED_UPP |
-| **u-layer total** | **0.0% (0/402)** | **86.5% (351/406)** | **SHIPPED_TOT** |
+| `u_transport.go` | 0.0% (0/85) | **89.1%** (82/92) | 73.9% (68/92) |
+| `u_packet_packer.go` | 0.0% (0/84) | **75.6%** (62/82) | 73.2% (60/82) |
+| **u-layer total** | **0.0% (0/402)** | **86.5% (351/406)** | **75.4% (306/406)** |
 
 (402 -> 406 statements: `QUICSpec.UDPDatagramMinSize` and `UTransport.Dial` were deleted, the
 `uDialsEarly` branch in `uDoDial` was added (§5), and the post-`init` connection-ID agreement check
 added two more — E3c/E26 below. The total is unchanged this round because the two statements the
 `InitPacketNumberLength` range check adds to `u_transport.go` are the two the now-unreachable `n > 4`
-branch removes from `u_packet_packer.go` (E31); the covered count moved 350 -> 351 because the new
-check's `if` and its `return` are both exercised while the deleted branch had one of each. Its `if` executes on the shipped path (`u_transport.go:91`
+branch removes from `u_packet_packer.go` (E31); the fork-suite covered count moved 350 -> 351 because
+the new check's `if` and its `return` are both exercised there, while the deleted branch had one of
+each. The shipped-path total is unchanged at 306/406 and the split is the intended one: the shipped
+profile shows `u_transport.go:70.2,70.78 1 1` — the check runs on every Sightglass dial — and
+`:71.3,72.1 1 0` — no shipped profile declares a width outside 1..4, so its refusal branch is not
+taken. Its `if` executes on the shipped path (`u_transport.go:91`
 is `1` in the shipped-path profile) and its refusal branch does not, which is the intended shape: no
 Sightglass session sets `Transport.ConnectionIDLength` or `ConnectionIDGenerator`, and every session
 builds its own `Transport` (`go/quich3/h3client.go:613`).)
@@ -746,7 +750,25 @@ was re-run afterwards and still goes red on the PING assertion.
 `go.mod` requires `github.com/Berserk-Automation-Hub/fhttp v0.6.9-sightglass.11` — the version
 `Sightglass/go/go.mod` ships. It previously said `v0.6.9-sightglass.1`, a ten-version skew, so the
 fork's own suite ran against an fhttp nobody deploys. `utls` is on `v1.7.8-sightglass.1`, which is
-also what Sightglass ships. There are no `replace` directives.
+also what Sightglass ships. There are no `replace` directives, here or in `Sightglass/go/go.mod`.
+Checked mechanically, both sides, this round:
+
+```
+$ grep Berserk /tmp/quic-go-utls-fork/go.mod        fhttp v0.6.9-sightglass.11
+                                                    utls  v1.7.8-sightglass.1
+$ grep Berserk Sightglass/go/go.mod                 fhttp v0.6.9-sightglass.11
+                                                    utls  v1.7.8-sightglass.1
+$ grep -c '^replace' Sightglass/go/go.mod           0
+```
+
+**Tag sequence for this round, stated because it is two tags and not one.**
+`v1.0.10-sightglass.8` carried the code and test changes; the shipped-path coverage figures in §3 can
+only be measured from the Sightglass repository AGAINST a published tag, so three cells of that table
+were still placeholders when `.8` was cut. `v1.0.10-sightglass.9` is `.8` plus those measured numbers,
+one false sentence in a `u_transport.go` comment corrected against what the ablation actually
+produced, and this note. `.9` is the tag `Sightglass/go/go.mod` consumes; `.8` was never consumed by
+anything and is superseded. The Go module proxy caches a tag's content immutably, so amending `.8`
+in place was not an option once it had been fetched.
 
 ---
 
@@ -760,6 +782,20 @@ $ gofmt -l <every file this patch touches>      # clean (NOT gofmt -w across the
 $ go vet ./...                                  # clean
 $ go test ./... -count=1                        # all packages ok, modulo the load flakes in §9.3
 ```
+
+This round, by command, in `/tmp/quic-go-utls-fork`:
+
+```
+$ gofmt -l u_conn_buffers_test.go u_quic_frames_test.go u_transport_test.go \
+          u_transport.go u_packet_packer.go               # clean
+$ go vet ./...                                            # clean
+$ go test ./... -count=1 -timeout 900s                    # 26 ok, 0 FAIL, 0 cached
+$ go test . ./internal/wire ./internal/handshake -count=2 # ok 42.319s / 0.223s / 0.460s
+```
+
+`-count=2` matters here: three of this round's assertions are statistical (120 builds each) and one
+drives two real dials, so a guard that passes once and fails on repeat would be the exact failure
+mode this repository has had before.
 
 ### 9.2 Regression diff against pristine v1.0.10-utls
 

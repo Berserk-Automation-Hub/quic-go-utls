@@ -60,13 +60,18 @@ func (t *UTransport) dialSpec(ctx context.Context, addr net.Addr, host string, t
 		return nil, fmt.Errorf("quic u-layer: SrcConnIDLength %d is outside the RFC 9000 §17.2 range 0..%d", l, protocol.MaxConnIDLen)
 	}
 	// RFC 9000 §17.2 gives the packet-number length a TWO-BIT field in the long header, so the only
-	// on-wire widths that exist are 1..4 bytes. Anything else is a malformed profile, and it has to
-	// be refused where the document enters the library: protocol.PacketNumberLen(n) is written
-	// straight into those two bits by hdr.Append, so a 5 would go out as a 1 and every later packet
-	// number on the connection would be decoded against a width the client never meant — silently,
-	// and with the profile field nowhere in sight. Zero keeps its documented meaning ("let quic-go
-	// choose", which never picks 1); a negative value is not "absent", it is wrong, and it used to be
-	// treated as absent.
+	// on-wire widths that exist are 1..4 bytes. Anything else is a malformed profile, and the two
+	// out-of-range directions used to fail differently, neither of them usefully — measured:
+	//
+	//	n > 4  reached wire.ExtendedHeader.Append and came back as
+	//	       "INTERNAL_ERROR (local): invalid packet number length: 5" — a connection-level error
+	//	       from inside wire, after the dial had started, naming no profile field.
+	//	n < 0  was not caught at all. The packer's pin reads `n > 0 && …`, so a negative width read
+	//	       as "absent" and the client sent a width its document never declared (HR-6).
+	//
+	// Both are refused here instead, where the document enters the library and the error can name
+	// the field, exactly as the two connection-ID lengths above are. Zero keeps its documented
+	// meaning: "let quic-go choose", which never picks 1.
 	if n := t.QUICSpec.InitialPacketSpec.InitPacketNumberLength; n < 0 || n > 4 {
 		return nil, fmt.Errorf("quic u-layer: InitPacketNumberLength %d is outside the RFC 9000 §17.2 range 1..4 (0 means \"let quic-go choose\")", n)
 	}
