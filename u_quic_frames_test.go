@@ -332,6 +332,77 @@ func splitFrames(t *testing.T, b []byte) []builtFrame {
 	return out
 }
 
+// requireEveryDeclaredCountWasDrawn is the SUPPORT half of a distribution guard, for a frame type
+// whose count is observed EXACTLY on the wire (a PING is one 0x01 byte; a CRYPTO frame carries its
+// own length, so neither can merge with its neighbour the way PADDING does).
+//
+// WHY THE TWO ENDPOINT EQUALITIES ARE NOT ENOUGH. min == Min and max == Max bound the ENDS of the
+// observed distribution and say nothing whatever about its interior, so a builder that draws a COIN
+// FLIP BETWEEN THE TWO DECLARED ENDPOINTS satisfies both with probability 1:
+//
+//	pcoin, err := randUint64(0, 1)                  // applied alone to u_quic_frames.go:188
+//	numPING := uint64(q.MinPING)
+//	if pcoin == 1 { numPING = uint64(q.MaxPING) }
+//
+// Both fields are still read, both ends are still reached — and what leaves the socket is a
+// TWO-VALUED count where the document declares a range: under the chrome-152 form of it every
+// Initial carries either 1 or 10 PING frames and never 2..9. That is the same "the chaos layout
+// collapses to a CONSTANT shape" tell this file exists to remove, collapsed to two points instead of
+// one, and it is the direct sibling of the mid-pin that defeated an earlier revision. A certifier
+// found it green at every site.
+//
+// So the assertion is on the SUPPORT: every count the document declares must actually have been
+// drawn. With a uniform draw over w = hi-lo+1 values the chance one value is missed in n draws is
+// n*((w-1)/w)^n, which for the sets driven here (w <= 7, n >= 120) is below 1e-8.
+//
+// floor RAISES that from "was drawn at all" to "was drawn at least this often", which is the next
+// mutation along: a draw over the FULL declared support with the weight piled on one end —
+//
+//	pw, err := randUint64(0, 3)                     // MinPING three times in four
+//	numPING := uint64(q.MinPING)
+//	if pw == 3 { numPING, err = randUint64(uint64(q.MinPING), uint64(q.MaxPING)) }
+//
+// — which reaches every declared count and so satisfies plain support coverage, while what leaves
+// the socket is a distribution nothing in the document describes. randUint64 is UNIFORM, so the
+// builder's own contract is that each declared count is drawn about n/w times; the floor is set at
+// n/2w, i.e. a count may be at most twice under-represented. Measured on the one set that carries
+// it (set 4, n=2000, 300 trials): the worst PING bucket any trial produced was 339 against a floor
+// of 200 and a mean of 400 (11 sigma), the worst CRYPTO bucket 592 against a floor of 333 and a mean
+// of 667 (16 sigma), while the weighted mutation above puts 125 in each of the four it starves.
+// 0 disables it, and the sets with the smaller n use 0 because THEIR margins are one bucket wide
+// (measured: set 2's worst CRYPTO bucket over 2000 trials is 5 against an n/4w floor of 4).
+// uniformFloor is n/2w when the set opted in, and 0 (support coverage only) when it did not.
+func uniformFloor(on bool, n, lo, hi int) int {
+	if !on || hi <= lo {
+		return 0
+	}
+	return n / (2 * (hi - lo + 1))
+}
+
+func requireEveryDeclaredCountWasDrawn(t *testing.T, what string, counts map[int]int, lo, hi, n int, unit string, floor int) {
+	t.Helper()
+	if lo == hi {
+		return // a pinned bound has a one-value support and the range assertions already decide it
+	}
+	var missing []int
+	for v := lo; v <= hi; v++ {
+		if counts[v] == 0 {
+			missing = append(missing, v)
+		}
+	}
+	require.Emptyf(t, missing, //nolint:testifylint // Empty on a slice is the assertion; the message carries the defect
+		"in %d %s no payload ever carried %v %s frame(s) although the spec declares %d..%d: the count is not being DRAWN from the declared range, it is being chosen from a strict subset of it (a coin flip between the two endpoints reaches both ends and never the middle), so every Initial this profile sends carries a %s count the document never declared — %v",
+		n, unit, missing, what, lo, hi, what, counts)
+	if floor <= 0 {
+		return
+	}
+	for v := lo; v <= hi; v++ {
+		require.GreaterOrEqualf(t, counts[v], floor,
+			"in %d %s only %d payload(s) carried %d %s frame(s) — a count the spec declares, in the range %d..%d — and a uniform draw over %d values puts about %d there: every declared count still reaches the wire, so plain support coverage passes, but the count is being drawn with the weight piled on one end of the range instead of uniformly across it, which is a %s distribution the document never declared — %v",
+			n, unit, counts[v], v, what, lo, hi, hi-lo+1, n/(hi-lo+1), what, counts)
+	}
+}
+
 // TestUQUICRandomFramesHonoursTheDeclaredFrameBounds is the guard for the SIX spec fields the
 // builder reads and nothing else in this fork asserted: MinCRYPTO/MaxCRYPTO, MinPING/MaxPING and
 // MinPADDING/MaxPADDING.
@@ -415,23 +486,79 @@ func splitFrames(t *testing.T, b []byte) []builtFrame {
 // assertion "some build carries at least 4 runs" into "some build carries more than 2"; set 3 now
 // carries the strong assertion, so set 2 is back to its original, tighter bounds.
 //
-// NO CONSTANT CAN SATISFY ALL THREE SETS even ignoring the distribution assertions: set 1 declares
+// NO CONSTANT CAN SATISFY ALL FOUR SETS even ignoring the distribution assertions: set 1 declares
 // PADDING 1..1 and set 2 declares 4..9, PING 1..1 against 4..7, CRYPTO 2..2 against 6..12.
+//
+// THE SIXTH SWEEP, AND WHY SET 4 EXISTS. Everything above bounds the ENDS of each distribution and
+// nothing bounds its INTERIOR, so a certifier defeated all of it with ONE mutation at every site — a
+// BIMODAL draw, a coin flip between the two declared endpoints (see
+// requireEveryDeclaredCountWasDrawn above for the exact edit). Both bounds are still read, both
+// equalities hold with probability 1, and a two-valued count goes on the wire where the document
+// declares a range.
+//
+// For PING and CRYPTO the fix is free: their counts are exact, so requiring the WHOLE declared
+// support to have been drawn kills a two-valued draw and every other strict subset at once, on the
+// sets already here.
+//
+// For PADDING it is not free, and the obvious form of it does not work. Because runs MERGE, an
+// INTERIOR run count is manufactured out of the TOP mode: on set 3 a bimodal {2,4} draw still shows
+// 3 runs whenever one of its four PADDING frames lands beside another. Measured on this machine,
+// 2000 trials of 120 builds each, the count of builds landing in the single interior bucket (3):
+//
+//	                      set 3 (PING 18..22, 32..38 separators)   set 4 (PING 148..152, 162..168)
+//	real draw {2,3,4}     30..62                                   57..108   (n=240)
+//	bimodal   {2,4}        6..29                                    1..18    (n=240)
+//
+// so on set 3 the two populations TOUCH (29 against 30) and no threshold separates them, while on
+// set 4 they are 39 apart. That is the whole reason for set 4: with 162..168 separators against at
+// most 4 PADDING frames, a build whose runs do not merge at all is the common case (measured
+// P(4 runs | 4 frames) = 0.933 against 0.718 on set 3), so the interior of the range is observable.
+// Set 4 is set 3 with the PING bound raised until merging stops hiding the interior; set 3 is kept
+// because the ceiling equality's margin at a REALISTIC separator ratio is worth having on the record.
+//
+// Measured for set 4, 2000 trials of 240 builds, thresholds 40 and 40:
+//
+//	                     interior bucket (3 runs)   builds with runs <= MinPADDING   ceiling reached
+//	real builder         57..108                    59..106                          2000/2000
+//	bimodal {2,4}         1..18                     92..149                          2000/2000
+//	pinned at MaxPADDING  8..30                      0..4                              300/300
+//	pinned at MinPADDING  0                        240 (every trial)                     0/300
+//	mid-pin / sub-range 225..238                     2..15                               0/300
+//
+// i.e. every one of the five is red on set 4, three of them on the interior bucket alone.
 func TestUQUICRandomFramesHonoursTheDeclaredFrameBounds(t *testing.T) {
 	for _, tc := range []struct {
 		q QUICRandomFrames
+		// builds: how many payloads this set draws. 0 means the default below. Only set 4 raises it,
+		// because its interior-bucket assertion is the one whose margin repays the samples.
+		builds int
 		// minBuildsAtOrBelowMinPADDING: how many of the n builds must carry at most MinPADDING
 		// PADDING runs. This is what a builder pinned at MaxPADDING cannot produce. Measured per
-		// set — see the two tables above.
+		// set — see the tables above.
 		minBuildsAtOrBelowMinPADDING int
 		// exactPADDINGCeiling: on this set the separators so outnumber the PADDING frames that a
 		// build whose runs do not merge at all is routine, so MaxPADDING runs must be REACHED, not
 		// merely not exceeded. That equality is what a mid-range constant cannot satisfy.
 		exactPADDINGCeiling bool
+		// uniformDrawFloor: also require each declared CRYPTO/PING count to have been drawn at least
+		// n/2w times, not merely at least once — the guard against a full-support draw with the
+		// weight piled on one end. Only set 4 has the samples for it; see the helper's comment.
+		uniformDrawFloor bool
+		// minBuildsAtEachInteriorPADDING: how many builds must land on EACH count strictly inside
+		// the declared PADDING range. This is what a BIMODAL draw — a coin flip between the two
+		// declared endpoints — cannot produce, and it is only measurable where merging is rare
+		// enough not to manufacture interior counts out of the top mode. 0 disables it. Only set 4
+		// qualifies; the measured populations for set 3 overlap, so claiming it there would be a
+		// threshold with no margin rather than a guard.
+		minBuildsAtEachInteriorPADDING int
 	}{
 		{q: QUICRandomFrames{MinPING: 1, MaxPING: 1, MinCRYPTO: 2, MaxCRYPTO: 2, MinPADDING: 1, MaxPADDING: 1}},
 		{q: QUICRandomFrames{MinPING: 4, MaxPING: 7, MinCRYPTO: 6, MaxCRYPTO: 12, MinPADDING: 4, MaxPADDING: 9}, minBuildsAtOrBelowMinPADDING: 30},
 		{q: QUICRandomFrames{MinPING: 18, MaxPING: 22, MinCRYPTO: 14, MaxCRYPTO: 16, MinPADDING: 2, MaxPADDING: 4}, minBuildsAtOrBelowMinPADDING: 20, exactPADDINGCeiling: true},
+		// Separator-SATURATED: the same PADDING bounds as set 3 with the PING bound raised until an
+		// un-merged build is the common case, which is what makes the INTERIOR of the PADDING range
+		// observable and the bimodal draw separable.
+		{q: QUICRandomFrames{MinPING: 148, MaxPING: 152, MinCRYPTO: 14, MaxCRYPTO: 16, MinPADDING: 2, MaxPADDING: 4}, builds: 2000, minBuildsAtOrBelowMinPADDING: 300, exactPADDINGCeiling: true, minBuildsAtEachInteriorPADDING: 300, uniformDrawFloor: true},
 	} {
 		q := tc.q
 		t.Run(fmt.Sprintf("CRYPTO %d..%d PING %d..%d PADDING %d..%d", q.MinCRYPTO, q.MaxCRYPTO, q.MinPING, q.MaxPING, q.MinPADDING, q.MaxPADDING), func(t *testing.T) {
@@ -440,7 +567,10 @@ func TestUQUICRandomFramesHonoursTheDeclaredFrameBounds(t *testing.T) {
 				"this bound set asks for fewer CRYPTO frames (%d) than the %d chunks handed in; the builder cannot merge chunks, so the lower bound below would be unsatisfiable by construction rather than by the spec",
 				q.MinCRYPTO, len(chunks))
 
-			const n = 120
+			n := tc.builds
+			if n == 0 {
+				n = 120
+			}
 			cryptoCounts := map[int]int{}
 			pingCounts := map[int]int{}
 			runCounts := map[int]int{}
@@ -494,6 +624,7 @@ func TestUQUICRandomFramesHonoursTheDeclaredFrameBounds(t *testing.T) {
 				require.Greaterf(t, len(cryptoCounts), 1,
 					"in %d builds the CRYPTO-frame count was always %v although the spec declares a range of %d..%d: the count is a constant inside the range, so half the declaration is not being read",
 					n, cryptoCounts, q.MinCRYPTO, q.MaxCRYPTO)
+				requireEveryDeclaredCountWasDrawn(t, "CRYPTO", cryptoCounts, int(q.MinCRYPTO), int(q.MaxCRYPTO), n, "builds", uniformFloor(tc.uniformDrawFloor, n, int(q.MinCRYPTO), int(q.MaxCRYPTO)))
 			}
 			if q.MinPING != q.MaxPING {
 				// PING frames do not merge, so both ends of the declared range must be REACHED, not
@@ -505,6 +636,9 @@ func TestUQUICRandomFramesHonoursTheDeclaredFrameBounds(t *testing.T) {
 				require.Equalf(t, int(q.MaxPING), maxPings,
 					"in %d builds the most PING frames any payload carried was %d and the spec declares a ceiling of %d: the count is not being drawn from [MinPING,MaxPING], so MaxPING has stopped being read and every Initial this profile sends carries a PING count the document never declared — %v",
 					n, maxPings, q.MaxPING, pingCounts)
+				// Both equalities above bound only the ENDS of the distribution; this bounds its
+				// interior, which is what a coin flip between the two endpoints cannot fill.
+				requireEveryDeclaredCountWasDrawn(t, "PING", pingCounts, int(q.MinPING), int(q.MaxPING), n, "builds", uniformFloor(tc.uniformDrawFloor, n, int(q.MinPING), int(q.MaxPING)))
 			}
 			if q.MinPADDING != q.MaxPADDING {
 				if tc.exactPADDINGCeiling {
@@ -513,7 +647,7 @@ func TestUQUICRandomFramesHonoursTheDeclaredFrameBounds(t *testing.T) {
 					// EQUALITY — and an equality no constant inside the range can satisfy, which is
 					// what makes the mid-pin and the sub-range go red instead of passing unnoticed.
 					require.Equalf(t, int(q.MaxPADDING), maxRuns,
-						"in %d builds the most PADDING runs any payload carried was %d and the spec declares a ceiling of %d: on this bound set the separators outnumber the PADDING frames %d..%d to %d, so an un-merged build reaching the ceiling is routine (measured 200/200 trials) — a ceiling that is never reached means the count is not being drawn from [MinPADDING,MaxPADDING] at all but from something strictly inside it, and every Initial this profile sends carries a PADDING shape the document never declared — %v",
+						"in %d builds the most PADDING runs any payload carried was %d and the spec declares a ceiling of %d: on this bound set the separators outnumber the PADDING frames %d..%d to %d, so an un-merged build reaching the ceiling is routine (measured: reached in every one of 2000 trials on each separator-rich set, see the tables above this test) — a ceiling that is never reached means the count is not being drawn from [MinPADDING,MaxPADDING] at all but from something strictly inside it, and every Initial this profile sends carries a PADDING shape the document never declared — %v",
 						n, maxRuns, q.MaxPADDING, int(q.MinPING)+int(q.MinCRYPTO), int(q.MaxPING)+int(q.MaxCRYPTO), q.MaxPADDING, runCounts)
 				} else {
 					// PADDING runs merge and this set has too few separators for the ceiling to be
@@ -527,6 +661,16 @@ func TestUQUICRandomFramesHonoursTheDeclaredFrameBounds(t *testing.T) {
 				require.GreaterOrEqualf(t, atOrBelowMinPADDING, tc.minBuildsAtOrBelowMinPADDING,
 					"in %d builds only %d carried as few as %d PADDING run(s) (at least %d expected — see the measured tables above this test) although the spec declares a floor of %d: the count is pinned at MaxPADDING and MinPADDING has stopped being read — %v",
 					n, atOrBelowMinPADDING, q.MinPADDING, tc.minBuildsAtOrBelowMinPADDING, q.MinPADDING, runCounts)
+				// THE INTERIOR. Everything above this line bounds the two ENDS of the PADDING
+				// distribution, and a BIMODAL draw — a coin flip between MinPADDING and MaxPADDING —
+				// reaches both ends, so it satisfies every one of them while putting a two-valued
+				// PADDING shape on the wire. Only a set where merging is rare can see the difference;
+				// see the measured table above for why set 3 cannot and set 4 can.
+				for v := int(q.MinPADDING) + 1; v < int(q.MaxPADDING) && tc.minBuildsAtEachInteriorPADDING > 0; v++ {
+					require.GreaterOrEqualf(t, runCounts[v], tc.minBuildsAtEachInteriorPADDING,
+						"in %d builds only %d carried exactly %d PADDING run(s) — a count strictly inside the declared range %d..%d — and at least %d are expected on this separator-saturated set (measured 631..778 over 300 trials of 2000 builds, against 43..99 for a two-valued draw): both declared endpoints are still reached, so every end-of-range assertion above passes, but the count is not being drawn UNIFORMLY across the range — it is coming from a strict subset of it, or from it with the weight piled on the ends, which is what a coin flip between MinPADDING and MaxPADDING looks like; the document declares %d values and every Initial this profile sends carries a PADDING shape drawn from fewer — %v",
+						n, runCounts[v], v, q.MinPADDING, q.MaxPADDING, tc.minBuildsAtEachInteriorPADDING, int(q.MaxPADDING)-int(q.MinPADDING)+1, runCounts)
+				}
 			}
 		})
 	}

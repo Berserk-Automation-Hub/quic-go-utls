@@ -176,7 +176,11 @@ full-package runs. §9.3 has the counts.
 
 Coverage of the eight u-layer source files, measured TWICE, because a single averaged number would
 hide the thing worth seeing: what the fork's own tests reach, and what the SHIPPED entry point
-reaches when Sightglass drives it.
+reaches when Sightglass drives it. **Seven of the eight are in the table**; the eighth,
+`u_conn_buffers.go`, is a single `const` block (`protocol.DesiredReceiveBufferSize` and its three
+siblings, §4) with NO statements at all, so `go tool cover` emits no block for it and it can be
+neither covered nor uncovered — counted in the file list, absent from a statement table by
+construction rather than by omission.
 
 *  **fork suite** — `go test . ./internal/wire ./internal/handshake -count=1 -coverpkg=./...` in this
    repository. "before" is the same command at commit `99b5288` (the last commit before the tests
@@ -188,7 +192,7 @@ reaches when Sightglass drives it.
 
 | File | before (fork suite) | after (fork suite) | shipped path |
 |---|---|---|---|
-| `internal/handshake/u_crypto_setup.go` | 0.0% (0/25) | **100.0%** (25/25) | 96.0% (24/25) |
+| `internal/handshake/u_crypto_setup.go` | 0.0% (0/26) | **100.0%** (25/25) | 96.0% (24/25) |
 | `internal/wire/u_transport_parameters.go` | 0.0% (0/32) | **96.9%** (31/32) | 75.0% (24/32) |
 | `u_quic_spec.go` | 0.0% (0/12) | **91.7%** (11/12) | 41.7% (5/12) |
 | `u_connection.go` | 0.0% (0/63) | **87.3%** (55/63) | 76.2% (48/63) |
@@ -197,9 +201,15 @@ reaches when Sightglass drives it.
 | `u_packet_packer.go` | 0.0% (0/84) | **75.6%** (62/82) | 73.2% (60/82) |
 | **u-layer total** | **0.0% (0/402)** | **86.5% (351/406)** | **75.4% (306/406)** |
 
-(402 -> 406 statements: `QUICSpec.UDPDatagramMinSize` and `UTransport.Dial` were deleted, the
-`uDialsEarly` branch in `uDoDial` was added (§5), and the post-`init` connection-ID agreement check
-added two more — E3c/E26 below. The total is unchanged this round because the two statements the
+(402 -> 406 statements, and the arithmetic is `u_crypto_setup.go` -1, `u_transport.go` +7,
+`u_packet_packer.go` -2 = +4: `QUICSpec.UDPDatagramMinSize` and `UTransport.Dial` were deleted, the
+`uDialsEarly` branch in `uDoDial` was added (§5), the post-`init` connection-ID agreement check added
+two more — E3c/E26 below — and `u_crypto_setup.go` LOST one when its `NewUCryptoSetupClient` preamble
+was rewritten (`63.2,67.1` carried one statement more than today's `66.2,69.1`), which is why its
+BEFORE cell above reads 0/26 and not the 0/25 an earlier revision of this table printed. With 0/25
+the BEFORE column summed to 401 against its own stated total of 0/402; re-measured at `99b5288` by
+the command at the head of this section, `internal/handshake/u_crypto_setup.go` is `0/26` and the
+column adds up. The total is unchanged this round because the two statements the
 `InitPacketNumberLength` range check adds to `u_transport.go` are the two the now-unreachable `n > 4`
 branch removes from `u_packet_packer.go` (E31); the fork-suite covered count moved 350 -> 351 because
 the new check's `if` and its `return` are both exercised there, while the deleted branch had one of
@@ -413,7 +423,7 @@ comparable. Packet timing (pacing, ACK cadence, PMTU probing, retransmit timing)
 
 ## 7. Ablation record
 
-"A guard I have not broken is not a guard." Each of the **51** rows below is one mutation, applied
+"A guard I have not broken is not a guard." Each of the **57** rows below is one mutation, applied
 **on its own**, with the named test run and the exact failure text recorded. All were then restored
 (`git status --short` clean of every ablation file afterwards).
 
@@ -460,11 +470,29 @@ table now carries all TWELVE single-factor mutations of the three `randUint64` c
 pinned at either end, plus a mid-pin and a sub-range per frame type), each run alone with its failure
 text, at each site.
 
-That is the fifth time an attack on this table found something, and it is the reason the "Element
+**A sixth sweep then falsified the fifth's replacement, at all three sites at once.** Everything the
+fifth sweep added bounds the ENDS of a distribution — `min == Min`, `max == Max`, `maxRuns ==
+MaxPADDING`, "enough builds at or below `MinPADDING`" — and NOTHING bounded its INTERIOR. A certifier
+replaced the uniform draw with a BIMODAL one, a coin flip between the two declared endpoints:
+
+```go
+pcoin, err := randUint64(0, 1)                  // u_quic_frames.go:188, applied ALONE
+numPING := uint64(q.MinPING)
+if pcoin == 1 { numPING = uint64(q.MaxPING) }
+```
+
+Both fields are still read, both ends still reach the wire, so every equality is satisfied with
+probability 1 — and under the chrome-152 form of it every Initial carries either 1 or 10 PING frames
+and never 2..9, which is the same "the chaos layout collapses to a CONSTANT shape" tell this family
+of tests exists to remove, collapsed to two points instead of one. It was green at the builder (3/3),
+on the wire (3/3) and in Sightglass, in its PING form and its PADDING form. What replaced it, per
+frame type, is in the E30m..E30r rows and in the "SIXTH sweep" section below; `45 -> 51 -> 57` rows.
+
+That is the sixth time an attack on this table found something, and it is the reason the "Element
 with no guard" section below states a NUMBER instead of an absolute, and why the claim this section
 makes is now the checkable one — **every mutation in the table below is red at the site(s) its row
 names, with the failure text recorded** — rather than the unfalsifiable "everything anyone has
-attacked is guarded", which has been wrong in three consecutive revisions.
+attacked is guarded", which has been wrong in four consecutive revisions.
 
 Three things about this table that were not true of the one it replaces:
 
@@ -528,18 +556,24 @@ Three things about this table that were not true of the one it replaces:
 | E29 | `useSpecInitial`'s `!onlyAck`: the spec layout runs even when the connection asked for an ACK-only packet | `TestUPacketPackerLeavesAnAckOnlyInitialToUpstream` | `the ACK-only Initial carries 3 frame(s): the connection asked for an ACK and the spec layout sent the pending ClientHello instead, in a window the congestion controller had closed` |
 | E2d | the structural buffer guard: reintroduce `var uGlobalWantReceive, uGlobalWantSend int` + exported `SetDesiredBufferSizes` in `sys_conn.go`, read by `wrapConnWithBuffers` (§4) | `TestUTransportSocketBufferPathHasNoPackageLevelState` | `sys_conn.go declares a package-level var uGlobalWantReceive int: a socket-buffer target in package state is shared by every session in the process, which is the cross-identity bleed C6 forbids; it belongs on the Transport that owns the socket` (and 6 more: two declarations, four reads/assignments, each with file:line) |
 | E2e | the same global, but read at each USE (`setSendBufferTo(pc, uGlobalWantSend)`) | `TestUTransportSocketBuffersCannotBeObservedByAnotherSession`, `…AreNotProcessGlobal` | `session 0's socket has SO_SNDBUF 262144; its own call asked for 131072 and session 1 asked for 262144. Session 1 ran to completion while session 0 was suspended between its two setsockopts, so a target that is not session 0's own can only have arrived through state the two sessions share` |
-| E30a | the frame builder's **MinCRYPTO** alone: `randUint64(uint64(q.MinCRYPTO), uint64(q.MaxCRYPTO))` -> `randUint64(uint64(q.MaxCRYPTO), uint64(q.MaxCRYPTO))` — the field stops being read, and the count stays INSIDE the declared range | `TestUQUICRandomFramesHonoursTheDeclaredFrameBounds/CRYPTO_6..12_PING_4..7_PADDING_4..9` and `…/CRYPTO_14..16_PING_18..22_PADDING_2..4` (builder), `TestUTransportInitialFrameCountsComeFromTheSpecsBounds/CRYPTO_9..12_PING_4..7_PADDING_3..6_in_200_dial(s)` and `…/CRYPTO_14..16_PING_18..22_PADDING_2..4_in_200_dial(s)` (wire), and in Sightglass `quich3.TestInitialPacketShapeMatchesChrome` (built through a temporary `replace`, removed afterwards) | builder: `in 120 builds the CRYPTO-frame count was always map[12:120] although the spec declares a range of 6..12: the count is a constant inside the range, so half the declaration is not being read` / wire: `in 200 dials the fewest CRYPTO frames any Initial carried was 12 and this dial's spec declares a floor of 9: the split count is not being drawn from [MinCRYPTO,MaxCRYPTO], so MinCRYPTO never reaches the packer — map[12:200]` / Sightglass: `in 200 cold Initials the fewest CRYPTO frames any one carried was 17 and the profile declares a floor of 4: … so min_crypto never reaches the packer and every Initial this profile sends has a layout the document never declared — map[17:200]` |
-| E30b | the frame builder's **MaxCRYPTO** alone: `randUint64(uint64(q.MinCRYPTO), uint64(q.MaxCRYPTO))` -> `randUint64(uint64(q.MinCRYPTO), uint64(q.MinCRYPTO))` | `TestUQUICRandomFramesHonoursTheDeclaredFrameBounds/CRYPTO_6..12_PING_4..7_PADDING_4..9` and `…/CRYPTO_14..16_PING_18..22_PADDING_2..4` (builder), `TestUTransportInitialFrameCountsComeFromTheSpecsBounds/CRYPTO_9..12_PING_4..7_PADDING_3..6_in_200_dial(s)` and `…/CRYPTO_14..16_PING_18..22_PADDING_2..4_in_200_dial(s)` (wire), and in Sightglass `quich3.TestInitialPacketShapeMatchesChrome` (built through a temporary `replace`, removed afterwards) | builder: `in 120 builds the CRYPTO-frame count was always map[6:120] although the spec declares a range of 6..12: the count is a constant inside the range, so half the declaration is not being read` / wire: `in 200 dials the most CRYPTO frames any Initial carried was 9 and this dial's spec declares a ceiling of 12: the split count is not being drawn from [MinCRYPTO,MaxCRYPTO], so MaxCRYPTO never reaches the packer — map[9:200]` / Sightglass: `in 200 cold Initials the most CRYPTO frames any one carried was 4 and the profile declares a ceiling of 17: … so max_crypto never reaches the packer — map[4:200]` |
-| E30c | the frame builder's **MinPING** alone: `randUint64(uint64(q.MinPING), uint64(q.MaxPING))` -> `randUint64(uint64(q.MaxPING), uint64(q.MaxPING))` | `TestUQUICRandomFramesHonoursTheDeclaredFrameBounds/CRYPTO_6..12_PING_4..7_PADDING_4..9` and `…/CRYPTO_14..16_PING_18..22_PADDING_2..4` (builder), `TestUTransportInitialFrameCountsComeFromTheSpecsBounds/CRYPTO_9..12_PING_4..7_PADDING_3..6_in_200_dial(s)` and `…/CRYPTO_14..16_PING_18..22_PADDING_2..4_in_200_dial(s)` (wire), and in Sightglass `quich3.TestInitialPacketShapeMatchesChrome` (built through a temporary `replace`, removed afterwards) | builder: `in 120 builds the fewest PING frames any payload carried was 7 and the spec declares a floor of 4: the count is not being drawn from [MinPING,MaxPING] (PING frames never merge on the wire, so the floor is reachable exactly) — map[7:120]` / wire: `in 200 dials the fewest PING frames any Initial carried was 7 and this dial's spec declares a floor of 4: PING frames never merge on the wire, so a floor that is never reached means MinPING is not what the packer drew from — map[7:200]` / Sightglass: `in 200 cold Initials the fewest PING frames any one carried was 10 and the profile declares a floor of 1: … min_ping is not what the packer drew from — map[10:200]` |
-| E30d | the frame builder's **MaxPING** alone: `randUint64(uint64(q.MinPING), uint64(q.MaxPING))` -> `randUint64(uint64(q.MinPING), uint64(q.MinPING))` — **one of the three mutations that left `v1.0.10-sightglass.9` entirely green** | `TestUQUICRandomFramesHonoursTheDeclaredFrameBounds/CRYPTO_6..12_PING_4..7_PADDING_4..9` and `…/CRYPTO_14..16_PING_18..22_PADDING_2..4` (builder), `TestUTransportInitialFrameCountsComeFromTheSpecsBounds/CRYPTO_9..12_PING_4..7_PADDING_3..6_in_200_dial(s)` and `…/CRYPTO_14..16_PING_18..22_PADDING_2..4_in_200_dial(s)` (wire), and in Sightglass `quich3.TestInitialPacketShapeMatchesChrome` (built through a temporary `replace`, removed afterwards) | builder: `in 120 builds the most PING frames any payload carried was 4 and the spec declares a ceiling of 7: the count is not being drawn from [MinPING,MaxPING], so MaxPING has stopped being read and every Initial this profile sends carries a PING count the document never declared — map[4:120]` / wire: `in 200 dials the most PING frames any Initial carried was 4 and this dial's spec declares a ceiling of 7: MaxPING has stopped reaching the packer, so every Initial this profile sends carries a PING count the document never declared — map[4:200]` / Sightglass: `in 200 cold Initials the most PING frames any one carried was 1 and the profile declares a ceiling of 10: max_ping has stopped reaching the packer … — map[1:200]` |
-| E30e | the frame builder's **MinPADDING** alone, pinned at the CEILING: `randUint64(uint64(q.MinPADDING), uint64(q.MaxPADDING))` -> `randUint64(uint64(q.MaxPADDING), uint64(q.MaxPADDING))` — **green at `.9`**. PADDING runs MERGE, so what separates this is the AT-OR-BELOW COUNT, not the range | `TestUQUICRandomFramesHonoursTheDeclaredFrameBounds/CRYPTO_6..12_PING_4..7_PADDING_4..9` and `…/CRYPTO_14..16_PING_18..22_PADDING_2..4` (builder), `TestUTransportInitialFrameCountsComeFromTheSpecsBounds/CRYPTO_9..12_PING_4..7_PADDING_3..6_in_200_dial(s)` and `…/CRYPTO_14..16_PING_18..22_PADDING_2..4_in_200_dial(s)` (wire), and in Sightglass `quich3.TestInitialPacketShapeMatchesChrome` (built through a temporary `replace`, removed afterwards) | builder: `in 120 builds only 13 carried as few as 4 PADDING run(s) (at least 30 expected — see the measured tables above this test) although the spec declares a floor of 4: the count is pinned at MaxPADDING and MinPADDING has stopped being read — map[3:1 4:12 5:28 6:43 7:24 8:10 9:2]` / wire: `in 200 dials only 18 Initial(s) carried as few as 3 PADDING run(s) (at least 55 expected — see the measured tables above this test) although this dial's spec declares a floor of 3: the count is pinned at MaxPADDING and MinPADDING never reaches the packer — map[2:2 3:16 4:60 5:82 6:40]` / Sightglass: `in 200 cold Initials only 10 carried as few as 3 PADDING run(s) (at least 30 expected …) although the profile declares a floor of 3: the count is pinned at max_padding and min_padding never reaches the packer — map[3:10 4:30 5:53 6:61 7:39 8:7]` |
-| E30f | the frame builder's **MaxPADDING** alone, pinned at the FLOOR: `randUint64(uint64(q.MinPADDING), uint64(q.MaxPADDING))` -> `randUint64(uint64(q.MinPADDING), uint64(q.MinPADDING))` — **green at `.9`** | `TestUQUICRandomFramesHonoursTheDeclaredFrameBounds/CRYPTO_6..12_PING_4..7_PADDING_4..9` and `…/CRYPTO_14..16_PING_18..22_PADDING_2..4` (builder), `TestUTransportInitialFrameCountsComeFromTheSpecsBounds/CRYPTO_9..12_PING_4..7_PADDING_3..6_in_200_dial(s)` and `…/CRYPTO_14..16_PING_18..22_PADDING_2..4_in_200_dial(s)` (wire), and in Sightglass `quich3.TestInitialPacketShapeMatchesChrome` (built through a temporary `replace`, removed afterwards) | builder: `in 120 builds no payload carried MORE than 4 PADDING run(s) although the spec declares up to 9: a payload can never carry more runs than the frames the builder emitted, so the count is pinned at MinPADDING and MaxPADDING has stopped being read — map[2:10 3:66 4:44]` / wire: `in 200 dials no Initial carried MORE than 3 PADDING run(s) although this dial's spec declares up to 6: an Initial can never carry more runs than the frames the builder emitted, so the count is pinned at MinPADDING and MaxPADDING never reaches the packer — map[1:2 2:49 3:149]` / Sightglass: `in 200 cold Initials the busiest carried 3 PADDING run(s), no more than the midpoint 5 of the declared range 3..8: … a count that never exceeds the midpoint is a CONSTANT at or below it rather than a draw from the document's range — map[1:3 2:58 3:139]` |
-| E30g | the frame builder's CRYPTO range replaced by its **MIDPOINT**: `mid := (uint64(q.MinCRYPTO)+uint64(q.MaxCRYPTO))/2; randUint64(mid, mid)` — a constant strictly INSIDE the declared range, neither endpoint read | `TestUQUICRandomFramesHonoursTheDeclaredFrameBounds/CRYPTO_6..12_PING_4..7_PADDING_4..9` and `…/CRYPTO_14..16_PING_18..22_PADDING_2..4` (builder), `TestUTransportInitialFrameCountsComeFromTheSpecsBounds/CRYPTO_9..12_PING_4..7_PADDING_3..6_in_200_dial(s)` and `…/CRYPTO_14..16_PING_18..22_PADDING_2..4_in_200_dial(s)` (wire), and in Sightglass `quich3.TestInitialPacketShapeMatchesChrome` (built through a temporary `replace`, removed afterwards) | builder: `in 120 builds the CRYPTO-frame count was always map[9:120] although the spec declares a range of 6..12: the count is a constant inside the range, so half the declaration is not being read` / wire: `in 200 dials the fewest CRYPTO frames any Initial carried was 10 and this dial's spec declares a floor of 9: the split count is not being drawn from [MinCRYPTO,MaxCRYPTO], so MinCRYPTO never reaches the packer — map[10:200]` / Sightglass: `in 200 cold Initials the fewest CRYPTO frames any one carried was 10 and the profile declares a floor of 4: … so min_crypto never reaches the packer — map[10:200]` |
-| E30h | the frame builder's CRYPTO range narrowed to a strict **SUB-RANGE**: `lo, hi := uint64(q.MinCRYPTO), uint64(q.MaxCRYPTO); if hi > lo+1 { lo, hi = lo+1, hi-1 }` — the count still VARIES, but NEITHER declared endpoint ever reaches the wire | `TestUQUICRandomFramesHonoursTheDeclaredFrameBounds/CRYPTO_6..12_PING_4..7_PADDING_4..9` and `…/CRYPTO_14..16_PING_18..22_PADDING_2..4` (builder), `TestUTransportInitialFrameCountsComeFromTheSpecsBounds/CRYPTO_9..12_PING_4..7_PADDING_3..6_in_200_dial(s)` and `…/CRYPTO_14..16_PING_18..22_PADDING_2..4_in_200_dial(s)` (wire), and in Sightglass `quich3.TestInitialPacketShapeMatchesChrome` (built through a temporary `replace`, removed afterwards) | builder: `in 120 builds the CRYPTO-frame count was always map[15:120] although the spec declares a range of 14..16: the count is a constant inside the range, so half the declaration is not being read` / wire: `in 200 dials the fewest CRYPTO frames any Initial carried was 10 and this dial's spec declares a floor of 9: the split count is not being drawn from [MinCRYPTO,MaxCRYPTO], so MinCRYPTO never reaches the packer — map[10:100 11:100]` / Sightglass: `in 200 cold Initials the fewest CRYPTO frames any one carried was 5 and the profile declares a floor of 4: … so min_crypto never reaches the packer — map[5:26 6:12 7:17 8:20 9:19 10:18 11:11 12:18 13:11 14:15 15:14 16:19]` |
-| E30i | the frame builder's PING range replaced by its **MIDPOINT** | `TestUQUICRandomFramesHonoursTheDeclaredFrameBounds/CRYPTO_6..12_PING_4..7_PADDING_4..9` and `…/CRYPTO_14..16_PING_18..22_PADDING_2..4` (builder), `TestUTransportInitialFrameCountsComeFromTheSpecsBounds/CRYPTO_9..12_PING_4..7_PADDING_3..6_in_200_dial(s)` and `…/CRYPTO_14..16_PING_18..22_PADDING_2..4_in_200_dial(s)` (wire), and in Sightglass `quich3.TestInitialPacketShapeMatchesChrome` (built through a temporary `replace`, removed afterwards) | builder: `in 120 builds the fewest PING frames any payload carried was 5 and the spec declares a floor of 4: the count is not being drawn from [MinPING,MaxPING] (PING frames never merge on the wire, so the floor is reachable exactly) — map[5:120]` / wire: `in 200 dials the fewest PING frames any Initial carried was 5 and this dial's spec declares a floor of 4: PING frames never merge on the wire, so a floor that is never reached means MinPING is not what the packer drew from — map[5:200]` / Sightglass: `in 200 cold Initials the fewest PING frames any one carried was 5 and the profile declares a floor of 1: … — map[5:200]` |
-| E30j | the frame builder's PING range narrowed to a strict **SUB-RANGE** | `TestUQUICRandomFramesHonoursTheDeclaredFrameBounds/CRYPTO_6..12_PING_4..7_PADDING_4..9` and `…/CRYPTO_14..16_PING_18..22_PADDING_2..4` (builder), `TestUTransportInitialFrameCountsComeFromTheSpecsBounds/CRYPTO_9..12_PING_4..7_PADDING_3..6_in_200_dial(s)` and `…/CRYPTO_14..16_PING_18..22_PADDING_2..4_in_200_dial(s)` (wire), and in Sightglass `quich3.TestInitialPacketShapeMatchesChrome` (built through a temporary `replace`, removed afterwards) | builder: `in 120 builds the fewest PING frames any payload carried was 5 and the spec declares a floor of 4: the count is not being drawn from [MinPING,MaxPING] (PING frames never merge on the wire, so the floor is reachable exactly) — map[5:67 6:53]` / wire: `in 200 dials the fewest PING frames any Initial carried was 5 and this dial's spec declares a floor of 4: PING frames never merge on the wire, so a floor that is never reached means MinPING is not what the packer drew from — map[5:107 6:93]` / Sightglass: `in 200 cold Initials the fewest PING frames any one carried was 2 and the profile declares a floor of 1: … — map[2:22 3:26 4:26 5:33 6:25 7:28 8:17 9:23]` |
-| E30k | the frame builder's PADDING range replaced by its **MIDPOINT**: `mid := (uint64(q.MinPADDING)+uint64(q.MaxPADDING))/2; randUint64(mid, mid)` — **this is the mutation a certifier used to defeat the FOURTH sweep's guard**: the run count still varies (merging), so every one-sided distribution bound passed | `…/CRYPTO_14..16_PING_18..22_PADDING_2..4` (builder), `…/CRYPTO_14..16_PING_18..22_PADDING_2..4_in_200_dial(s)` (wire), and in Sightglass `quich3.TestInitialPacketShapeMatchesChrome` (built through a temporary `replace`, removed afterwards) | builder: `in 120 builds the most PADDING runs any payload carried was 3 and the spec declares a ceiling of 4: on this bound set the separators outnumber the PADDING frames 32..38 to 4, so an un-merged build reaching the ceiling is routine (measured 200/200 trials) — a ceiling that is never reached means the count is not being drawn from [MinPADDING,MaxPADDING] at all but from something strictly inside it, and every Initial this profile sends carries a PADDING shape the document never declared — map[2:16 3:104]` / wire: `in 200 dials the most PADDING runs any Initial carried was 3 and this dial's spec declares a ceiling of 4: … a ceiling that is never reached means the count never comes from [MinPADDING,MaxPADDING] but from something strictly inside it … — map[1:1 2:31 3:168]` / Sightglass: `in 200 cold Initials the busiest carried 5 PADDING run(s), no more than the midpoint 5 of the declared range 3..8: … — map[2:12 3:45 4:87 5:56]` |
-| E30l | the frame builder's PADDING range narrowed to a strict **SUB-RANGE**: `if hi > lo+1 { lo, hi = lo+1, hi-1 }` — **the other mutation that defeated the FOURTH sweep's guard**, at all three sites | `…/CRYPTO_14..16_PING_18..22_PADDING_2..4` (builder), `…/CRYPTO_14..16_PING_18..22_PADDING_2..4_in_200_dial(s)` (wire), and in Sightglass `quich3.TestInitialPacketShapeMatchesChrome` (built through a temporary `replace`, removed afterwards). **NOT separated at the Sightglass site** — see the scope note below | builder: `in 120 builds the most PADDING runs any payload carried was 3 and the spec declares a ceiling of 4: on this bound set the separators outnumber the PADDING frames 32..38 to 4, so an un-merged build reaching the ceiling is routine (measured 200/200 trials) — … — map[2:20 3:100]` / wire: `in 200 dials the most PADDING runs any Initial carried was 3 and this dial's spec declares a ceiling of 4: … — map[1:1 2:29 3:170]` / Sightglass: **GREEN, and that is recorded rather than hidden.** chrome-152 declares PADDING 3..8 against only 5..27 separators, so the ceiling is not exactly reachable on the shipped profile and a 4..7 draw is indistinguishable there: `PADDING runs map[2:10 3:42 4:75 5:49 6:24] (52 at or below min_padding=3, 30 required; busiest 6 runs, more than the midpoint 5 required)` |
+| E30a | the frame builder's **MinCRYPTO** alone: `randUint64(uint64(q.MinCRYPTO), uint64(q.MaxCRYPTO))` -> `randUint64(uint64(q.MaxCRYPTO), uint64(q.MaxCRYPTO))` — the field stops being read, and the count stays INSIDE the declared range | `TestUQUICRandomFramesHonoursTheDeclaredFrameBounds` sets 2/3/4 (builder), `TestUTransportInitialFrameCountsComeFromTheSpecsBounds` sets 2/3/4 (wire), and in Sightglass `quich3.TestInitialPacketShapeMatchesChrome` (built through a temporary `replace`, removed afterwards) | builder (set 4): `in 2000 builds the CRYPTO-frame count was always map[16:2000] although the spec declares a range of 14..16: the count is a constant inside the range, so half the declaration is not being read` / wire (set 4): `in 1000 dials the fewest CRYPTO frames any Initial carried was 16 and this dial's spec declares a floor of 14: the split count is not being drawn from [MinCRYPTO,MaxCRYPTO], so MinCRYPTO never reaches the packer — map[16:1000]` / Sightglass: `in 400 cold Initials the fewest CRYPTO frames any one carried was 17 and the profile declares a floor of 4: the split count is not being drawn from min_crypto..max_crypto, so min_crypto never reaches the packer and every Initial this profile sends has a layout the document never declared — map[17:400]` |
+| E30b | the frame builder's **MaxCRYPTO** alone: `randUint64(uint64(q.MinCRYPTO), uint64(q.MaxCRYPTO))` -> `randUint64(uint64(q.MinCRYPTO), uint64(q.MinCRYPTO))` | `TestUQUICRandomFramesHonoursTheDeclaredFrameBounds` sets 2/3/4 (builder), `TestUTransportInitialFrameCountsComeFromTheSpecsBounds` sets 2/3/4 (wire), and in Sightglass `quich3.TestInitialPacketShapeMatchesChrome` (built through a temporary `replace`, removed afterwards) | builder (set 4): `in 2000 builds the CRYPTO-frame count was always map[14:2000] although the spec declares a range of 14..16: the count is a constant inside the range, so half the declaration is not being read` / wire (set 4): `in 1000 dials the most CRYPTO frames any Initial carried was 14 and this dial's spec declares a ceiling of 16: the split count is not being drawn from [MinCRYPTO,MaxCRYPTO], so MaxCRYPTO never reaches the packer — map[14:1000]` / Sightglass: `in 400 cold Initials the most CRYPTO frames any one carried was 4 and the profile declares a ceiling of 17: the split count is not being drawn from min_crypto..max_crypto, so max_crypto never reaches the packer — map[4:400]` |
+| E30c | the frame builder's **MinPING** alone: `randUint64(uint64(q.MinPING), uint64(q.MaxPING))` -> `randUint64(uint64(q.MaxPING), uint64(q.MaxPING))` | `TestUQUICRandomFramesHonoursTheDeclaredFrameBounds` sets 2/3/4 (builder), `TestUTransportInitialFrameCountsComeFromTheSpecsBounds` sets 2/3/4 (wire), and in Sightglass `quich3.TestInitialPacketShapeMatchesChrome` (built through a temporary `replace`, removed afterwards) | builder (set 4): `in 2000 builds the fewest PING frames any payload carried was 152 and the spec declares a floor of 148: the count is not being drawn from [MinPING,MaxPING] (PING frames never merge on the wire, so the floor is reachable exactly) — map[152:2000]` / wire (set 4): `in 1000 dials the fewest PING frames any Initial carried was 152 and this dial's spec declares a floor of 148: PING frames never merge on the wire, so a floor that is never reached means MinPING is not what the packer drew from — map[152:1000]` / Sightglass: `in 400 cold Initials the fewest PING frames any one carried was 10 and the profile declares a floor of 1: PING frames never merge on the wire, so a floor that is never reached means min_ping is not what the packer drew from — map[10:400]` |
+| E30d | the frame builder's **MaxPING** alone: `randUint64(uint64(q.MinPING), uint64(q.MaxPING))` -> `randUint64(uint64(q.MinPING), uint64(q.MinPING))` — **one of the three mutations that left `v1.0.10-sightglass.9` entirely green** | `TestUQUICRandomFramesHonoursTheDeclaredFrameBounds` sets 2/3/4 (builder), `TestUTransportInitialFrameCountsComeFromTheSpecsBounds` sets 2/3/4 (wire), and in Sightglass `quich3.TestInitialPacketShapeMatchesChrome` (built through a temporary `replace`, removed afterwards) | builder (set 4): `in 2000 builds the most PING frames any payload carried was 148 and the spec declares a ceiling of 152: the count is not being drawn from [MinPING,MaxPING], so MaxPING has stopped being read and every Initial this profile sends carries a PING count the document never declared — map[148:2000]` / wire (set 4): `in 1000 dials the most PING frames any Initial carried was 148 and this dial's spec declares a ceiling of 152: MaxPING has stopped reaching the packer, so every Initial this profile sends carries a PING count the document never declared — map[148:1000]` / Sightglass: `in 400 cold Initials the most PING frames any one carried was 1 and the profile declares a ceiling of 10: max_ping has stopped reaching the packer, so every Initial this profile sends carries a PING count the document never declared — map[1:400]` |
+| E30e | the frame builder's **MinPADDING** alone, pinned at the CEILING: `randUint64(uint64(q.MinPADDING), uint64(q.MaxPADDING))` -> `randUint64(uint64(q.MaxPADDING), uint64(q.MaxPADDING))` — **green at `.9`**. PADDING runs MERGE, so what separates this is the AT-OR-BELOW COUNT, not the range | `TestUQUICRandomFramesHonoursTheDeclaredFrameBounds` sets 2/3/4 (builder), `TestUTransportInitialFrameCountsComeFromTheSpecsBounds` sets 2/3/4 (wire), and in Sightglass `quich3.TestInitialPacketShapeMatchesChrome` (built through a temporary `replace`, removed afterwards) | builder (set 4): `in 2000 builds only 2 carried as few as 2 PADDING run(s) (at least 300 expected — see the measured tables above this test) although the spec declares a floor of 2: the count is pinned at MaxPADDING and MinPADDING has stopped being read — map[2:2 3:120 4:1878]` / wire (set 4): `in 1000 dials only 1 Initial(s) carried as few as 2 PADDING run(s) (at least 150 expected — see the measured tables above this test) although this dial's spec declares a floor of 2: the count is pinned at MaxPADDING and MinPADDING never reaches the packer — map[2:1 3:64 4:935]` / Sightglass: `in 400 cold Initials only 14 carried as few as 3 PADDING run(s) (at least 60 expected — see the measured table above this function) although the profile declares a floor of 3: the count is pinned at max_padding and min_padding never reaches the packer — map[2:1 3:13 4:65 5:120 6:121 7:66 8:14]` |
+| E30f | the frame builder's **MaxPADDING** alone, pinned at the FLOOR: `randUint64(uint64(q.MinPADDING), uint64(q.MaxPADDING))` -> `randUint64(uint64(q.MinPADDING), uint64(q.MinPADDING))` — **green at `.9`** | `TestUQUICRandomFramesHonoursTheDeclaredFrameBounds` sets 2/3/4 (builder), `TestUTransportInitialFrameCountsComeFromTheSpecsBounds` sets 2/3/4 (wire), and in Sightglass `quich3.TestInitialPacketShapeMatchesChrome` (built through a temporary `replace`, removed afterwards) | builder (set 4): `in 2000 builds the most PADDING runs any payload carried was 2 and the spec declares a ceiling of 4: on this bound set the separators outnumber the PADDING frames 162..168 to 4, so an un-merged build reaching the ceiling is routine (measured: reached in every one of 2000 trials on each separator-rich set, see the tables above this test) — a ceiling that is never reached means the count is not being drawn from [MinPADDING,MaxPADDING] at all but from something strictly inside it, and every Initial this profile sends carries a PADDING shape the document never declared — map[1:21 2:1979]` / wire (set 4): `in 1000 dials the most PADDING runs any Initial carried was 2 and this dial's spec declares a ceiling of 4: on this bound set the separators outnumber the PADDING frames 162..168 to 4, so an un-merged Initial reaching the ceiling is routine (measured: reached in every trial of both separator-rich sets, see the tables above this test) — a ceiling that is never reached means the count never comes from [MinPADDING,MaxPADDING] but from something strictly inside it, and every Initial this spec sends carries a PADDING shape the document never declared — map[1:12 2:988]` / Sightglass: `in 400 cold Initials the busiest carried 3 PADDING run(s), no more than the midpoint 5 of the declared range 3..8: an Initial can never carry more runs than the frames the builder emitted, so a count that never exceeds the midpoint is a CONSTANT at or below it rather than a draw from the document's range, and max_padding is not reaching the packer — map[1:6 2:116 3:278]` |
+| E30g | the frame builder's CRYPTO range replaced by its **MIDPOINT**: `mid := (uint64(q.MinCRYPTO)+uint64(q.MaxCRYPTO))/2; randUint64(mid, mid)` — a constant strictly INSIDE the declared range, neither endpoint read | `TestUQUICRandomFramesHonoursTheDeclaredFrameBounds` sets 2/3/4 (builder), `TestUTransportInitialFrameCountsComeFromTheSpecsBounds` sets 2/3/4 (wire), and in Sightglass `quich3.TestInitialPacketShapeMatchesChrome` (built through a temporary `replace`, removed afterwards) | builder (set 4): `in 2000 builds the CRYPTO-frame count was always map[15:2000] although the spec declares a range of 14..16: the count is a constant inside the range, so half the declaration is not being read` / wire (set 4): `in 1000 dials the fewest CRYPTO frames any Initial carried was 15 and this dial's spec declares a floor of 14: the split count is not being drawn from [MinCRYPTO,MaxCRYPTO], so MinCRYPTO never reaches the packer — map[15:1000]` / Sightglass: `in 400 cold Initials the fewest CRYPTO frames any one carried was 10 and the profile declares a floor of 4: the split count is not being drawn from min_crypto..max_crypto, so min_crypto never reaches the packer and every Initial this profile sends has a layout the document never declared — map[10:400]` |
+| E30h | the frame builder's CRYPTO range narrowed to a strict **SUB-RANGE**: `lo, hi := uint64(q.MinCRYPTO), uint64(q.MaxCRYPTO); if hi > lo+1 { lo, hi = lo+1, hi-1 }` — the count still VARIES, but NEITHER declared endpoint ever reaches the wire | `TestUQUICRandomFramesHonoursTheDeclaredFrameBounds` sets 2/3/4 (builder), `TestUTransportInitialFrameCountsComeFromTheSpecsBounds` sets 2/3/4 (wire), and in Sightglass `quich3.TestInitialPacketShapeMatchesChrome` (built through a temporary `replace`, removed afterwards) | builder (set 4): `in 2000 builds the CRYPTO-frame count was always map[15:2000] although the spec declares a range of 14..16: the count is a constant inside the range, so half the declaration is not being read` / wire (set 4): `in 1000 dials the fewest CRYPTO frames any Initial carried was 15 and this dial's spec declares a floor of 14: the split count is not being drawn from [MinCRYPTO,MaxCRYPTO], so MinCRYPTO never reaches the packer — map[15:1000]` / Sightglass: `in 400 cold Initials the fewest CRYPTO frames any one carried was 5 and the profile declares a floor of 4: the split count is not being drawn from min_crypto..max_crypto, so min_crypto never reaches the packer and every Initial this profile sends has a layout the document never declared — map[5:39 6:29 7:32 8:30 9:33 10:36 11:33 12:35 13:30 14:31 15:30 16:42]` |
+| E30i | the frame builder's PING range replaced by its **MIDPOINT** | `TestUQUICRandomFramesHonoursTheDeclaredFrameBounds` sets 2/3/4 (builder), `TestUTransportInitialFrameCountsComeFromTheSpecsBounds` sets 2/3/4 (wire), and in Sightglass `quich3.TestInitialPacketShapeMatchesChrome` (built through a temporary `replace`, removed afterwards) | builder (set 4): `in 2000 builds the fewest PING frames any payload carried was 150 and the spec declares a floor of 148: the count is not being drawn from [MinPING,MaxPING] (PING frames never merge on the wire, so the floor is reachable exactly) — map[150:2000]` / wire (set 4): `in 1000 dials the fewest PING frames any Initial carried was 150 and this dial's spec declares a floor of 148: PING frames never merge on the wire, so a floor that is never reached means MinPING is not what the packer drew from — map[150:1000]` / Sightglass: `in 400 cold Initials the fewest PING frames any one carried was 5 and the profile declares a floor of 1: PING frames never merge on the wire, so a floor that is never reached means min_ping is not what the packer drew from — map[5:400]` |
+| E30j | the frame builder's PING range narrowed to a strict **SUB-RANGE** | `TestUQUICRandomFramesHonoursTheDeclaredFrameBounds` sets 2/3/4 (builder), `TestUTransportInitialFrameCountsComeFromTheSpecsBounds` sets 2/3/4 (wire), and in Sightglass `quich3.TestInitialPacketShapeMatchesChrome` (built through a temporary `replace`, removed afterwards) | builder (set 4): `in 2000 builds the fewest PING frames any payload carried was 149 and the spec declares a floor of 148: the count is not being drawn from [MinPING,MaxPING] (PING frames never merge on the wire, so the floor is reachable exactly) — map[149:700 150:661 151:639]` / wire (set 4): `in 1000 dials the fewest PING frames any Initial carried was 149 and this dial's spec declares a floor of 148: PING frames never merge on the wire, so a floor that is never reached means MinPING is not what the packer drew from — map[149:339 150:339 151:322]` / Sightglass: `in 400 cold Initials the fewest PING frames any one carried was 2 and the profile declares a floor of 1: PING frames never merge on the wire, so a floor that is never reached means min_ping is not what the packer drew from — map[2:49 3:50 4:63 5:58 6:52 7:49 8:42 9:37]` |
+| E30k | the frame builder's PADDING range replaced by its **MIDPOINT**: `mid := (uint64(q.MinPADDING)+uint64(q.MaxPADDING))/2; randUint64(mid, mid)` — **this is the mutation a certifier used to defeat the FOURTH sweep's guard**: the run count still varies (merging), so every one-sided distribution bound passed | `TestUQUICRandomFramesHonoursTheDeclaredFrameBounds` sets 3/4 (builder), `TestUTransportInitialFrameCountsComeFromTheSpecsBounds` sets 3/4 (wire), and in Sightglass `quich3.TestInitialPacketShapeMatchesChrome` (built through a temporary `replace`, removed afterwards) | builder (set 4): `in 2000 builds the most PADDING runs any payload carried was 3 and the spec declares a ceiling of 4: on this bound set the separators outnumber the PADDING frames 162..168 to 4, so an un-merged build reaching the ceiling is routine (measured: reached in every one of 2000 trials on each separator-rich set, see the tables above this test) — a ceiling that is never reached means the count is not being drawn from [MinPADDING,MaxPADDING] at all but from something strictly inside it, and every Initial this profile sends carries a PADDING shape the document never declared — map[2:75 3:1925]` / wire (set 4): `in 1000 dials the most PADDING runs any Initial carried was 3 and this dial's spec declares a ceiling of 4: on this bound set the separators outnumber the PADDING frames 162..168 to 4, so an un-merged Initial reaching the ceiling is routine (measured: reached in every trial of both separator-rich sets, see the tables above this test) — a ceiling that is never reached means the count never comes from [MinPADDING,MaxPADDING] but from something strictly inside it, and every Initial this spec sends carries a PADDING shape the document never declared — map[2:43 3:957]` / Sightglass: `in 400 cold Initials the busiest carried 5 PADDING run(s), no more than the midpoint 5 of the declared range 3..8: an Initial can never carry more runs than the frames the builder emitted, so a count that never exceeds the midpoint is a CONSTANT at or below it rather than a draw from the document's range, and max_padding is not reaching the packer — map[1:1 2:15 3:88 4:175 5:121]` |
+| E30l | the frame builder's PADDING range narrowed to a strict **SUB-RANGE**: `if hi > lo+1 { lo, hi = lo+1, hi-1 }` — **the other mutation that defeated the FOURTH sweep's guard**, at all three sites | `TestUQUICRandomFramesHonoursTheDeclaredFrameBounds` sets 3/4 (builder), `TestUTransportInitialFrameCountsComeFromTheSpecsBounds` sets 3/4 (wire) | builder (set 4): `in 2000 builds the most PADDING runs any payload carried was 3 and the spec declares a ceiling of 4: on this bound set the separators outnumber the PADDING frames 162..168 to 4, so an un-merged build reaching the ceiling is routine (measured: reached in every one of 2000 trials on each separator-rich set, see the tables above this test) — a ceiling that is never reached means the count is not being drawn from [MinPADDING,MaxPADDING] at all but from something strictly inside it, and every Initial this profile sends carries a PADDING shape the document never declared — map[2:78 3:1922]` / wire (set 4): `in 1000 dials the most PADDING runs any Initial carried was 3 and this dial's spec declares a ceiling of 4: on this bound set the separators outnumber the PADDING frames 162..168 to 4, so an un-merged Initial reaching the ceiling is routine (measured: reached in every trial of both separator-rich sets, see the tables above this test) — a ceiling that is never reached means the count never comes from [MinPADDING,MaxPADDING] but from something strictly inside it, and every Initial this spec sends carries a PADDING shape the document never declared — map[2:36 3:964]` / Sightglass: **GREEN, and that is recorded rather than hidden** — see the scope note below |
+| E30m | the frame builder's PING range replaced by a **BIMODAL DRAW** — a coin flip between the two declared ENDPOINTS: `pcoin, err := randUint64(0, 1); numPING := uint64(q.MinPING); if pcoin == 1 { numPING = uint64(q.MaxPING) }`. **This is the mutation a certifier used to defeat the FIFTH sweep's guard at ALL THREE SITES AT ONCE**: both fields are still read and both ends still reach the wire, so every endpoint equality is satisfied with probability 1, while what leaves the socket is a TWO-VALUED count where the document declares a range | `TestUQUICRandomFramesHonoursTheDeclaredFrameBounds` sets 2/3/4 (builder), `TestUTransportInitialFrameCountsComeFromTheSpecsBounds` sets 2/3/4 (wire), and in Sightglass `quich3.TestInitialPacketShapeMatchesChrome` (built through a temporary `replace`, removed afterwards) | builder (set 4): `in 2000 builds no payload ever carried [149 150 151] PING frame(s) although the spec declares 148..152: the count is not being DRAWN from the declared range, it is being chosen from a strict subset of it (a coin flip between the two endpoints reaches both ends and never the middle), so every Initial this profile sends carries a PING count the document never declared — map[148:1001 152:999]` / wire (set 4): `in 1000 dials no payload ever carried [149 150 151] PING frame(s) although the spec declares 148..152: the count is not being DRAWN from the declared range, it is being chosen from a strict subset of it (a coin flip between the two endpoints reaches both ends and never the middle), so every Initial this profile sends carries a PING count the document never declared — map[148:512 152:488]` / Sightglass: `in 400 cold Initials not one carried [2 3 4 5 6 7 8 9] PING frame(s), although the profile declares 1..10: the count is not being DRAWN from the declared range, it is being chosen from a strict subset of it — a draw over only the two declared endpoints reaches both ends, so every equality above passes, and still puts a two-valued PING count on the wire where the document declares 10 — map[1:190 10:210]` |
+| E30n | the same BIMODAL DRAW on **PADDING** (`dcoin`/`MinPADDING`/`MaxPADDING`). PADDING runs MERGE, so an interior run count is manufactured out of the top mode and set 3 cannot see this: measured over 2000 trials of 120 builds, the interior bucket holds 30..62 under the real draw and 6..29 under this one — populations that TOUCH. Set 4 is the set that separates them. **GREEN at the Sightglass site**, for the same reason E30l is — see the scope note below. | `TestUQUICRandomFramesHonoursTheDeclaredFrameBounds` set 4 (builder), `TestUTransportInitialFrameCountsComeFromTheSpecsBounds` set 4 (wire) | builder (set 4): `in 2000 builds only 65 carried exactly 3 PADDING run(s) — a count strictly inside the declared range 2..4 — and at least 300 are expected on this separator-saturated set (measured 631..778 over 300 trials of 2000 builds, against 43..99 for a two-valued draw): both declared endpoints are still reached, so every end-of-range assertion above passes, but the count is not being drawn UNIFORMLY across the range — it is coming from a strict subset of it, or from it with the weight piled on the ends, which is what a coin flip between MinPADDING and MaxPADDING looks like; the document declares 3 values and every Initial this profile sends carries a PADDING shape drawn from fewer — map[1:6 2:1023 3:65 4:906]` / wire (set 4): `in 1000 dials only 31 Initial(s) carried exactly 3 PADDING run(s) — a count strictly inside the declared range 2..4 — and at least 150 are expected on this separator-saturated set: both declared endpoints still reach the wire, so every end-of-range assertion above passes, but the count that reaches the packer is not drawn UNIFORMLY across the range — it comes from a strict subset of it, or from it with the weight piled on the ends, which is what a coin flip between MinPADDING and MaxPADDING looks like on the wire — map[1:2 2:490 3:31 4:477]` / Sightglass: **GREEN, and that is recorded rather than hidden** — see the scope note below |
+| E30o | the same BIMODAL DRAW on **CRYPTO** (`ccoin`/`MinCRYPTO`/`MaxCRYPTO`) | `TestUQUICRandomFramesHonoursTheDeclaredFrameBounds` sets 2/3/4 (builder), `TestUTransportInitialFrameCountsComeFromTheSpecsBounds` sets 2/3/4 (wire), and in Sightglass `quich3.TestInitialPacketShapeMatchesChrome` (built through a temporary `replace`, removed afterwards) | builder (set 4): `in 2000 builds no payload ever carried [15] CRYPTO frame(s) although the spec declares 14..16: the count is not being DRAWN from the declared range, it is being chosen from a strict subset of it (a coin flip between the two endpoints reaches both ends and never the middle), so every Initial this profile sends carries a CRYPTO count the document never declared — map[14:978 16:1022]` / wire (set 4): `in 1000 dials no payload ever carried [15] CRYPTO frame(s) although the spec declares 14..16: the count is not being DRAWN from the declared range, it is being chosen from a strict subset of it (a coin flip between the two endpoints reaches both ends and never the middle), so every Initial this profile sends carries a CRYPTO count the document never declared — map[14:512 16:488]` / Sightglass: `in 400 cold Initials not one carried [5 6 7 8 9 10 11 12 13 14 15 16] CRYPTO frame(s), although the profile declares 4..17: the count is not being DRAWN from the declared range, it is being chosen from a strict subset of it — a draw over only the two declared endpoints reaches both ends, so every equality above passes, and still puts a two-valued CRYPTO count on the wire where the document declares 14 — map[4:195 17:205]` |
+| E30p | the frame builder's PING range replaced by a **WEIGHTED DRAW** over the FULL declared support — `pw, err := randUint64(0, 3); numPING := uint64(q.MinPING); if pw == 3 { numPING, err = randUint64(uint64(q.MinPING), uint64(q.MaxPING)) }`, i.e. `MinPING` three times in four. Every declared count still reaches the wire, so support coverage alone passes; what is wrong is the SHAPE of the distribution. Caught by the n/2w population floor, which only set 4 draws enough samples to carry. **GREEN at the Sightglass site**, and disclosed rather than hidden: chrome-152's PING range is 10 values wide, so 400 cold Initials put ~40 in each bucket against ~7..15 under the mutation, and no population floor separates those without a flake budget this repository will not spend. Guarded at the fork, where the bound set is ours to choose and the margin is 11 sigma. | `TestUQUICRandomFramesHonoursTheDeclaredFrameBounds` set 4 (builder), `TestUTransportInitialFrameCountsComeFromTheSpecsBounds` set 4 (wire) | builder (set 4): `in 2000 builds only 91 payload(s) carried 149 PING frame(s) — a count the spec declares, in the range 148..152 — and a uniform draw over 5 values puts about 400 there: every declared count still reaches the wire, so plain support coverage passes, but the count is being drawn with the weight piled on one end of the range instead of uniformly across it, which is a PING distribution the document never declared — map[148:1613 149:91 150:98 151:86 152:112]` / wire (set 4): `in 1000 dials only 44 payload(s) carried 149 PING frame(s) — a count the spec declares, in the range 148..152 — and a uniform draw over 5 values puts about 200 there: every declared count still reaches the wire, so plain support coverage passes, but the count is being drawn with the weight piled on one end of the range instead of uniformly across it, which is a PING distribution the document never declared — map[148:805 149:44 150:62 151:43 152:46]` / Sightglass: **GREEN, and that is recorded rather than hidden** — see the scope note below |
+| E30q | the same WEIGHTED DRAW on **CRYPTO**. **GREEN at the Sightglass site**, same reason as E30p (14 declared CRYPTO counts, ~29 per bucket against ~4..11). | `TestUQUICRandomFramesHonoursTheDeclaredFrameBounds` set 4 (builder), `TestUTransportInitialFrameCountsComeFromTheSpecsBounds` set 4 (wire) | builder (set 4): `in 2000 builds only 154 payload(s) carried 15 CRYPTO frame(s) — a count the spec declares, in the range 14..16 — and a uniform draw over 3 values puts about 666 there: every declared count still reaches the wire, so plain support coverage passes, but the count is being drawn with the weight piled on one end of the range instead of uniformly across it, which is a CRYPTO distribution the document never declared — map[14:1677 15:154 16:169]` / wire (set 4): `in 1000 dials only 93 payload(s) carried 15 CRYPTO frame(s) — a count the spec declares, in the range 14..16 — and a uniform draw over 3 values puts about 333 there: every declared count still reaches the wire, so plain support coverage passes, but the count is being drawn with the weight piled on one end of the range instead of uniformly across it, which is a CRYPTO distribution the document never declared — map[14:821 15:93 16:86]` / Sightglass: **GREEN, and that is recorded rather than hidden** — see the scope note below |
+| E30r | the same WEIGHTED DRAW on **PADDING**. **GREEN at the Sightglass site**, same reason as E30l/E30n. | `TestUQUICRandomFramesHonoursTheDeclaredFrameBounds` set 4 (builder), `TestUTransportInitialFrameCountsComeFromTheSpecsBounds` set 4 (wire) | builder (set 4): `in 2000 builds only 151 carried exactly 3 PADDING run(s) — a count strictly inside the declared range 2..4 — and at least 300 are expected on this separator-saturated set (measured 631..778 over 300 trials of 2000 builds, against 43..99 for a two-valued draw): both declared endpoints are still reached, so every end-of-range assertion above passes, but the count is not being drawn UNIFORMLY across the range — it is coming from a strict subset of it, or from it with the weight piled on the ends, which is what a coin flip between MinPADDING and MaxPADDING looks like; the document declares 3 values and every Initial this profile sends carries a PADDING shape drawn from fewer — map[1:19 2:1670 3:151 4:160]` / wire (set 4): `in 1000 dials only 80 Initial(s) carried exactly 3 PADDING run(s) — a count strictly inside the declared range 2..4 — and at least 150 are expected on this separator-saturated set: both declared endpoints still reach the wire, so every end-of-range assertion above passes, but the count that reaches the packer is not drawn UNIFORMLY across the range — it comes from a strict subset of it, or from it with the weight piled on the ends, which is what a coin flip between MinPADDING and MaxPADDING looks like on the wire — map[1:10 2:829 3:80 4:81]` / Sightglass: **GREEN, and that is recorded rather than hidden** — see the scope note below |
 | E31 | the `InitPacketNumberLength` 1..4 range check in `dialSpec` | `TestUTransportRejectsAPacketNumberLengthNoLongHeaderCanCarry/*` (3/3) | `expected: "quic u-layer: InitPacketNumberLength 5 is outside the RFC 9000 §17.2 range 1..4 (0 means \"let quic-go choose\")" / actual: "INTERNAL_ERROR (local): invalid packet number length: 5"` and, for `-1`, `actual: "context deadline exceeded"` — the dial went ahead |
 | E32 | the packer's `&& uint64(hdr.PacketNumber) == p.uSpec.InitialPacketSpec.InitPacketNumber`, i.e. the pn-length pin applied to EVERY Initial rather than the first | `TestUTransportSecondInitialKeepsUpstreamPacketNumberLength` | `the second Initial also uses a 1-byte packet-number field; the spec pins only the first` (`Should not be: 0x1`) |
 
@@ -773,21 +807,27 @@ and a constant in the middle satisfies both. The exact form (`the ceiling must b
 one that separates it, and the reason the fourth sweep did not use it is real: on its bound sets the
 ceiling was not reachable. A third bound set was added to make it reachable.
 
-**The three bound sets and what each carries**, in both the builder test and the wire test:
+**The four bound sets and what each carries**, in both the builder test and the wire test. The table
+rows below name them by these numbers.
 
-| set | builder bounds | wire bounds | what it decides |
-|---|---|---|---|
-| 1 | CRYPTO 2..2, PING 1..1, PADDING 1..1 | CRYPTO 4..5, PING 1..1, PADDING 1..1 | every bound pinned; one build/dial decides the per-packet bounds |
-| 2 | CRYPTO 6..12, PING 4..7, PADDING 4..9 | CRYPTO 9..12, PING 4..7, PADDING 3..6 | wide ranges, FEW separators; CRYPTO/PING exactly, PADDING only against an endpoint pin |
-| 3 | CRYPTO 14..16, PING 18..22, PADDING 2..4 | the same | SEPARATOR-RICH: 32..38 separators against at most 4 PADDING frames, so the PADDING ceiling is exactly reachable and is asserted as an EQUALITY |
+| set | builder bounds | wire bounds | n | what it decides |
+|---|---|---|---|---|
+| 1 | CRYPTO 2..2, PING 1..1, PADDING 1..1 | CRYPTO 4..5, PING 1..1, PADDING 1..1 | 120 / 1 | every bound pinned; one build/dial decides the per-packet bounds |
+| 2 | CRYPTO 6..12, PING 4..7, PADDING 4..9 | CRYPTO 9..12, PING 4..7, PADDING 3..6 | 120 / 200 | wide ranges, FEW separators; CRYPTO/PING exactly, PADDING only against an endpoint pin |
+| 3 | CRYPTO 14..16, PING 18..22, PADDING 2..4 | the same | 120 / 200 | SEPARATOR-RICH: 32..38 separators against at most 4 PADDING frames, so the PADDING ceiling is exactly reachable and is asserted as an EQUALITY |
+| 4 | CRYPTO 14..16, PING 148..152, PADDING 2..4 | the same | 2000 / 1000 | SEPARATOR-SATURATED: 162..168 separators against at most 4 PADDING frames, so merging is rare (measured P(4 runs \| 4 frames) = 0.933 against 0.718 on set 3) and the INTERIOR of the PADDING range becomes observable — which is the only thing that separates a two-valued draw. Its sample count is what lets it also carry the n/2w uniformity floor (E30p/E30q) |
 
-No single constant satisfies all three (set 1 declares PADDING 1..1, set 2 declares 4..9; PING 1..1
+No single constant satisfies all four (set 1 declares PADDING 1..1, set 2 declares 4..9; PING 1..1
 against 4..7; CRYPTO 2..2 against 6..12).
 
 * **CRYPTO and PING frames are counted EXACTLY off the decrypted wire** — a PING is one `0x01` byte,
   a CRYPTO frame carries its own length — so both ENDS of each declared range must be REACHED, not
   merely respected. For those two frame types a count pinned anywhere inside the range, a mid-pin and
-  a sub-range all fail one of the two equalities with probability 1 (E30a..E30d, E30g..E30j).
+  a sub-range all fail one of the two equalities with probability 1 (E30a..E30d, E30g..E30j). **A
+  two-valued draw fails NEITHER equality** — it reaches both ends by construction — which is what the
+  sixth sweep found (E30m, E30o); the assertion that catches it is on the SUPPORT, `every count the
+  spec declares was actually drawn`, and the one that catches a full-support draw with the weight
+  piled on one end is the n/2w population floor on set 4 (E30p, E30q).
 * **PADDING runs MERGE**: the builder shuffles its PADDING frames in among the others and two that
   land side by side read back as ONE run, because QUIC's PADDING frame is a single zero byte and no
   reader can tell four in one frame from four one-byte frames. So `runs <= frames emitted`, always,
@@ -796,7 +836,11 @@ against 4..7; CRYPTO 2..2 against 6..12).
   the mid-pin and the sub-range at once (E30f, E30k, E30l). **On set 2 they do not** — the ceiling is
   reached in 8 of 60 trials at the builder and 4% of dials on the wire — so set 2 keeps the weak
   lower bound and says so in the test's own header comment. The CEILING pin is killed on both sets by
-  the at-or-below count (E30e).
+  the at-or-below count (E30e). **Set 3 still cannot see a two-valued draw**, because merging
+  manufactures an interior run count out of the top mode: measured over 2000 trials of 120 builds the
+  interior bucket holds 30..62 under the real draw and 6..29 under the bimodal one, populations that
+  TOUCH. **Set 4 can**: 57..108 against 1..18 at 240 builds, 631..778 against 43..99 at 2000, so the
+  interior is asserted as a POPULATION there (E30n, E30r).
 
 Measured on this machine, 120 builds and 200 dials per trial, the mutations emulated exactly (a pin
 at `k` is the degenerate range `k..k`, which is the draw the mutated `randUint64` makes):
@@ -825,16 +869,76 @@ relative to the one before it.
 
 **Scope note, stated because an earlier revision claimed more than it had.** `min_padding` and
 `max_padding` are guarded at THREE sites against a pin at either endpoint and against a mid-range
-constant, and at the TWO FORK sites against a sub-range draw. They are **NOT** guarded against a
-sub-range draw at the Sightglass site: chrome-152 declares PADDING 3..8 against only 5..27 separators,
-so merging makes the declared ceiling unreachable there (8 runs occur about once in 200 Initials) and
-a 4..7 draw is not distinguishable from 3..8 by any observable measured. That is E30l's row, recorded
-GREEN. The exact-ceiling equality that does separate it needs a separator-rich bound set, and this
-repository's Sightglass-side test may only drive the SHIPPED document (HR-1/HR-5), so that assertion
-lives in the fork, at both fork sites.
+constant, and at the TWO FORK sites against a sub-range draw, a two-valued draw and a weighted draw.
+They are **NOT** guarded at the Sightglass site against any draw whose SUPPORT is a strict subset of
+the declared range: chrome-152 declares PADDING 3..8 against only 5..27 separators, so merging makes
+the declared ceiling unreachable there (8 runs occur about once in 200 Initials) and neither a 4..7
+draw nor a coin flip over {3,8} is distinguishable from 3..8 by any observable measured — E30l and
+E30n, both recorded GREEN, the second with `PADDING runs map[1:7 2:64 3:136 4:17 5:69 6:64 7:31 8:12]
+(207 at or below min_padding=3, 60 required; busiest 8 runs, more than the midpoint 5 required)`. The
+exact-ceiling equality and the interior population that DO separate them need a separator-rich and a
+separator-saturated bound set, and this repository's Sightglass-side test may only drive the SHIPPED
+document (HR-1/HR-5), so both assertions live in the fork, at both fork sites. `docs/tasks.json`
+T0517 tracks the residual and names what would unblock it.
 
-Nothing in `u_quic_frames.go` changed in the fourth or the fifth sweep. Both are GUARD changes, and
-the coverage number is the proof that they had to be: fork-suite u-layer coverage is
+**A second Sightglass-side residual, same shape, disclosed for the same reason.** A draw over the
+FULL declared support with the weight piled on one end (E30p, E30q) is red at the fork and GREEN at
+the Sightglass site, for PING and for CRYPTO. Closing it needs a per-count POPULATION floor, and a
+floor is only a guard when it sits many sigma below the bucket mean. chrome-152's ranges are wide —
+10 declared PING counts and 14 declared CRYPTO counts — so 400 cold Initials give bucket means of ~40
+and ~29 (measured thinnest buckets over five clean runs: 25..33 and 17..23) against ~7..15 and ~4..11
+under the mutation. No floor separates those two populations without a flake budget this repository
+will not spend, and buying the margin with samples would mean thousands of cold Initials in a test
+that runs in the default `go test ./...`. The floor therefore lives on set 4 of the two fork tests,
+where the bound set is ours to choose: 5 declared PING counts over 2000 builds is a mean of 400
+against a floor of 200, and the worst bucket in 300 trials was 339 — 11 sigma of margin, against 125
+under the mutation.
+
+### The SIXTH sweep: bounding both ENDS of a distribution says nothing about its INTERIOR
+
+Every assertion the fifth sweep added is an end-of-range assertion — `min == Min`, `max == Max`,
+`maxRuns == MaxPADDING`, "enough builds at or below `MinPADDING`". A certifier defeated ALL of them,
+at ALL THREE SITES, with one mutation applied alone and restored:
+
+```go
+pcoin, err := randUint64(0, 1)                       // u_quic_frames.go:188 — BIMODAL
+numPING := uint64(q.MinPING)
+if pcoin == 1 { numPING = uint64(q.MaxPING) }
+// and the same shape at :202 for MinPADDING/MaxPADDING
+```
+
+Builder 3/3 PASS, wire 3/3 PASS, Sightglass `ok`. Both fields are still read and both ends still
+reach the wire — which is precisely why the equalities cannot see it — and what leaves the socket is
+a TWO-VALUED count where the document declares a range: under the chrome-152 form every Initial
+carries either 1 or 10 PING frames and never 2..9.
+
+**What replaced it, per frame type, and why PADDING needed a new bound set.**
+
+* **PING and CRYPTO are counted exactly**, so the fix is free and total: every count the spec declares
+  must actually have been drawn (`requireEveryDeclaredCountWasDrawn`). That kills a two-valued draw
+  and every other strict-subset draw at once, on the sets already there. With `w = hi-lo+1` values and
+  `n >= 120` draws the chance a uniform builder misses one is below 1e-8.
+* **PADDING runs MERGE, so the obvious form of the same fix does not work.** "The histogram contains
+  an interior value" is satisfied by a bimodal draw, because a merge turns one of the top mode's runs
+  into an interior count. Measured, 2000 trials of 120 builds, the population of set 3's single
+  interior bucket: **real 30..62, bimodal 6..29** — they touch, and no threshold separates them. Set 4
+  raises the PING bound to 148..152, i.e. 162..168 separators against at most 4 PADDING frames, until
+  an un-merged build is the common case; there the same measurement gives **real 57..108 against
+  bimodal 1..18** at 240 builds and **631..778 against 43..99** at 2000, so the interior is asserted
+  as a POPULATION (threshold 300 at the builder, 150 on the wire).
+* **One mutation further out, tried and closed rather than left for the next sweep:** a draw over the
+  FULL support with the weight piled on one end (three draws in four returning the floor). It reaches
+  every declared count, so support coverage passes. Set 4's sample count buys a per-count floor of
+  n/2w — a count may be at most twice under-represented — with 11 to 16 sigma of margin, and that is
+  E30p/E30q/E30r. It is GREEN at the Sightglass site and the scope note above says why.
+
+All twelve mutations of the fifth sweep were re-run against the guard this sweep leaves behind, and
+all twelve are still red at the sites their rows name; the six new ones are E30m..E30r. The bound
+sets 1..3 were not touched, so the earlier rows' bounds and their failure texts are the same
+assertions on the same data.
+
+Nothing in `u_quic_frames.go` changed in the fourth, fifth or sixth sweep. All three are GUARD
+changes, and the coverage number is the proof that they had to be: fork-suite u-layer coverage is
 **86.5% (351/406) before and after**, measured both ways by the command at the head of §3, because
 the mutations these assertions catch were all inside branches the old tests already executed. A
 coverage number could never have shown this gap.
@@ -869,23 +973,26 @@ it (E2d, E2e).
 
 ### Element with no guard
 
-**One with no possible test, plus one mutation that is recorded GREEN — and the honest form of the
-claim is a NUMBER and a table, not an absolute.** Five successive attacks on this table have each
-found something (four elements in the first, three in the second, three plus a missing row and a
-false sentence in the third, three single-factor pins in the fourth, and a sub-range plus a mid-pin
-in the fifth), so "every element is guarded" and "every element anyone has attacked is guarded" are
-both claims this document has been wrong about. What it says instead is the checkable one: **every
-mutation in the table above is red at the site(s) its row names, with the failure text recorded, and
-the one row that is GREEN at one of its three sites (E30l, a PADDING sub-range at the Sightglass
-site) says so in the row.**
+**One with no possible test, plus five mutations recorded GREEN at one of their three sites — and the
+honest form of the claim is a NUMBER and a table, not an absolute.** Six successive attacks on this
+table have each found something (four elements in the first, three in the second, three plus a missing
+row and a false sentence in the third, three single-factor pins in the fourth, a sub-range plus a
+mid-pin in the fifth, and a two-valued draw at all three sites in the sixth), so "every element is
+guarded" and "every element anyone has attacked is guarded" are both claims this document has been
+wrong about. What it says instead is the checkable one: **every mutation in the table above is red at
+the site(s) its row names, with the failure text recorded, and the five rows that are GREEN at the
+Sightglass site (E30l, E30n, E30p, E30q, E30r — a PADDING sub-range, a two-valued PADDING draw, and
+the three weighted draws) say so in the row and are measured in the scope notes above.**
 
 Counting from the table: the four a certifier turned green against the first revision (E24 ii/iii,
 E5 ii, E6 ii, E3c/E26), the three we then found ourselves (E27, E28, E29), the three the third sweep
 found (E30a, E30b, E31), the three the FOURTH sweep found inside E30a/E30b's own guard (E30d, E30e,
-E30f — the single-factor pins that a range assertion cannot see) and the two the FIFTH sweep found
+E30f — the single-factor pins that a range assertion cannot see), the two the FIFTH sweep found
 inside that guard in turn (E30k, E30l — the mid-pin and the sub-range, which a one-sided distribution
-bound cannot see) are all red at the fork, and all but E30l's Sightglass column are red everywhere
-their rows name. One element has no test that can go red at all:
+bound cannot see) and the two the SIXTH found inside THAT one (E30m, E30n — the two-valued draw,
+which no end-of-range assertion can see) are all red at the fork, and all but the five Sightglass
+columns named above are red everywhere their rows name. One element has no test that can go red at
+all:
 
 The **fhttp pin alignment** (§8) has no test that can go red, and that is not an oversight. Go's
 minimal-version selection means a consumer that requires a newer fhttp gets the newer one regardless
@@ -942,14 +1049,16 @@ $ grep Berserk Sightglass/go/go.mod                 fhttp v0.6.9-sightglass.11
 $ grep -c '^replace' Sightglass/go/go.mod           0
 ```
 
-**Tag sequence for this round, stated because it is two tags and not one.**
-`v1.0.10-sightglass.8` carried the code and test changes; the shipped-path coverage figures in §3 can
-only be measured from the Sightglass repository AGAINST a published tag, so three cells of that table
-were still placeholders when `.8` was cut. `v1.0.10-sightglass.9` is `.8` plus those measured numbers,
-one false sentence in a `u_transport.go` comment corrected against what the ablation actually
-produced, and this note. `.9` is the tag `Sightglass/go/go.mod` consumes; `.8` was never consumed by
-anything and is superseded. The Go module proxy caches a tag's content immutably, so amending `.8`
-in place was not an option once it had been fetched.
+**Tag sequence, stated because the shipped-path column cannot be measured before a tag exists.**
+The shipped-path coverage figures in §3 can only be measured from the Sightglass repository AGAINST a
+published tag, which is why the table has historically lagged a tag behind: `.8` carried the code and
+test changes with three cells still placeholders, `.9` added the measured numbers, and `.9` is the
+tag those numbers were taken at. `.10`, `.11` and `.12` changed **no `.go` source file at all** —
+`git diff --name-only v1.0.10-sightglass.9 HEAD` lists `u_quic_frames_test.go`, `u_transport_test.go`
+and this file, and nothing else — so the shipped-path column measured at `.9` is still the column
+`.12` produces, and it was re-run at `.12` to confirm rather than assumed. `.12` is the tag
+`Sightglass/go/go.mod` consumes. The Go module proxy caches a tag's content immutably, so amending a
+published tag in place is never an option once it has been fetched.
 
 ---
 
@@ -970,31 +1079,37 @@ This round, by command, in `/tmp/quic-go-utls-fork`:
 $ gofmt -l u_quic_frames_test.go u_transport_test.go       # clean (the only two files this round touches)
 $ go vet ./...                                             # clean
 $ go test ./... -count=1 -timeout 1800s                    # 26 ok, 0 FAIL, 0 cached
-$ go test . ./internal/wire ./internal/handshake -count=2  # ok 37.989s / 0.598s / 0.344s
+$ go test . ./internal/wire ./internal/handshake -count=2  # ok 38.328s / 0.616s / 0.538s
 ```
 
 REGRESSION DIFF for this round, by command, rather than a green-suite claim: the same
 `go test ./... -count=1 -timeout 1800s` with these two test files stashed (`git stash push`) and then
-restored, nothing cached (`grep -c '(cached)'` = 0 on both runs) —
+restored, nothing cached (`grep -c '(cached)'` = 0 on both runs), and the per-package verdict lines
+diffed against each other —
 
 ```
-BEFORE (v1.0.10-sightglass.10 tree)  26 ok, 0 FAIL
-AFTER  (this round)                  26 ok, 0 FAIL
-NEW failures                         none
+BEFORE (v1.0.10-sightglass.11 tree)  26 ok, 0 FAIL, 0 cached
+AFTER  (this round)                  26 ok, 0 FAIL, 0 cached
+diff of the 26 verdict lines         empty  -> NEW failures: none
 ```
 
-Twelve single-factor mutations of the three `randUint64` calls in `u_quic_frames.go` were then
+EIGHTEEN single-factor mutations of the three `randUint64` calls in `u_quic_frames.go` were then
 applied ONE AT A TIME (`cp` backup, mutate, run, restore; `git status --short` clean of
-`u_quic_frames.go` afterwards) and each was run against BOTH guard tests separately. All twelve are
-red at both fork sites; the per-mutation failure text is in rows E30a..E30l. The Sightglass column of
-those rows was produced the same way, through a temporary `replace` in `Sightglass/go/go.mod` that
-was removed afterwards (`grep -n replace go/go.mod` finds only the two occurrences inside the header
-comment).
+`u_quic_frames.go` afterwards) and each was run against BOTH guard tests and against the Sightglass
+site. All eighteen are red at both fork sites — the twelve from earlier sweeps re-run unchanged, plus
+E30m..E30r — and fourteen are red in Sightglass as well; the five recorded GREEN there are E30l,
+E30n, E30p, E30q and E30r, each with the measurement that explains it. The per-mutation failure text
+is in rows E30a..E30r. The Sightglass column was produced through a temporary `GOWORK` overlay
+pointing at this working tree, so `Sightglass/go/go.mod` was never edited to produce it
+(`grep -n replace go/go.mod` finds only the two occurrences inside the header comment).
 
-`-count=2` matters here: every assertion added this round is statistical (120 builds at the builder,
-200 dials on the wire), so a guard that passes once and fails on repeat would be the exact failure
-mode this repository has had before. The margins are printed by the tests themselves on every run —
-see the `t.Logf` census in both — so an eroding margin shows up in the output and not only in a flake.
+`-count=2` matters here: every assertion in these two tests is statistical (120 to 2000 builds at the
+builder, 1 to 1000 dials on the wire), so a guard that passes once and fails on repeat would be the
+exact failure mode this repository has had before. The margins are printed by the tests themselves on
+every run — see the `t.Logf` census in both, and the Sightglass census now prints the THINNEST
+declared bucket explicitly, because that single number is what the support assertions actually run
+on. Every threshold in this round was set from a measured distribution, not from a model: 2000 trials
+for the interior-bucket populations, 300 trials for the per-count floors.
 
 Fork-suite u-layer coverage is **86.5% (351/406) before and after**, measured both ways by the
 command at the head of §3. This round adds no statements to the fork's source; it replaces range

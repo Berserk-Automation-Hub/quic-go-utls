@@ -444,6 +444,22 @@ func uDialOneInitial(t *testing.T, spec *QUICSpec, conf *Config) []byte {
 // existed. A previous round widened them to 2..8, which silently weakened the per-dial ceiling
 // assertion "runs <= 6" into "runs <= 8"; SET 3 now carries the strong assertion, so SET 2 is back to
 // its original, tighter bounds.
+//
+// SET 4, AND WHY EVERYTHING ABOVE WAS STILL TOO WEAK. Every assertion above bounds the ENDS of a
+// distribution and none bounds its INTERIOR, so a certifier defeated all of it with ONE mutation: a
+// BIMODAL draw, a coin flip between the two declared endpoints (the edit is quoted in
+// requireEveryDeclaredCountWasDrawn, u_quic_frames_test.go). Both bounds stay read, both equalities
+// hold with probability 1, and a TWO-VALUED count goes on the wire where the spec declares a range —
+// under its PING form every Initial carries exactly MinPING or exactly MaxPING and nothing between.
+//
+// PING and CRYPTO are counted exactly, so requiring the WHOLE declared support to have been drawn
+// kills that on the sets already here. PADDING runs merge, and merging MANUFACTURES interior counts
+// out of the top mode — on SET 3 a bimodal {2,4} draw still shows 3 runs whenever two of its four
+// PADDING frames land side by side, and the real and bimodal populations of that bucket TOUCH. SET 4
+// is SET 3 with the PING bound raised to 148..152, i.e. 162..168 separators against at most 4 PADDING
+// frames, until an un-merged Initial is the common case and the interior is observable. Measured at
+// the builder, 2000 trials of 120/240 builds, builds landing in the single interior bucket (3 runs):
+// SET 3 real 30..62 against bimodal 6..29 (overlapping), SET 4 real 57..108 against bimodal 1..18.
 func TestUTransportInitialFrameCountsComeFromTheSpecsBounds(t *testing.T) {
 	// MinCRYPTO is >= 3 in every ranged set because quic-go's initial crypto stream hands the builder
 	// three CRYPTO chunks for this ClientHello (measured, 5/5 dials) and the builder can only SPLIT
@@ -459,6 +475,15 @@ func TestUTransportInitialFrameCountsComeFromTheSpecsBounds(t *testing.T) {
 		// un-merged Initial reaching MaxPADDING runs is routine, so the ceiling must be REACHED.
 		// That equality is what a constant strictly inside the range cannot satisfy.
 		exactPADDINGCeiling bool
+		// uniformDrawFloor: also require each declared CRYPTO/PING count to have been drawn at least
+		// n/2w times, not merely at least once — see requireEveryDeclaredCountWasDrawn. Only SET 4
+		// dials enough times for the margin to be real.
+		uniformDrawFloor bool
+		// minDialsAtEachInteriorPADDING: how many Initials must carry EACH run count strictly inside
+		// the declared range. This is what a BIMODAL draw cannot produce, and it is only measurable
+		// where merging is rare enough not to manufacture interior counts out of the top mode. 0
+		// disables it; only SET 4 qualifies.
+		minDialsAtEachInteriorPADDING int
 	}{
 		// Every bound pinned: one dial decides it, and no constant satisfies it and the sets below.
 		{fb: QUICRandomFrames{MinPING: 1, MaxPING: 1, MinCRYPTO: 4, MaxCRYPTO: 5, MinPADDING: 1, MaxPADDING: 1}, dials: 1},
@@ -466,6 +491,9 @@ func TestUTransportInitialFrameCountsComeFromTheSpecsBounds(t *testing.T) {
 		{fb: QUICRandomFrames{MinPING: 4, MaxPING: 7, MinCRYPTO: 9, MaxCRYPTO: 12, MinPADDING: 3, MaxPADDING: 6}, dials: 200, minDialsAtOrBelowMinPADDING: 55},
 		// Separator-rich: the PADDING ceiling is exactly reachable, so it is asserted exactly.
 		{fb: QUICRandomFrames{MinPING: 18, MaxPING: 22, MinCRYPTO: 14, MaxCRYPTO: 16, MinPADDING: 2, MaxPADDING: 4}, dials: 200, minDialsAtOrBelowMinPADDING: 45, exactPADDINGCeiling: true},
+		// Separator-SATURATED: merging is rare enough here that the INTERIOR of the PADDING range is
+		// observable, which is the only thing that separates a two-valued draw from a real one.
+		{fb: QUICRandomFrames{MinPING: 148, MaxPING: 152, MinCRYPTO: 14, MaxCRYPTO: 16, MinPADDING: 2, MaxPADDING: 4}, dials: 1000, minDialsAtOrBelowMinPADDING: 150, exactPADDINGCeiling: true, minDialsAtEachInteriorPADDING: 150, uniformDrawFloor: true},
 	} {
 		fb := tc.fb
 		t.Run(fmt.Sprintf("CRYPTO %d..%d PING %d..%d PADDING %d..%d in %d dial(s)", fb.MinCRYPTO, fb.MaxCRYPTO, fb.MinPING, fb.MaxPING, fb.MinPADDING, fb.MaxPADDING, tc.dials), func(t *testing.T) {
@@ -525,6 +553,11 @@ func TestUTransportInitialFrameCountsComeFromTheSpecsBounds(t *testing.T) {
 			require.Equalf(t, int(fb.MaxPING), maxPings,
 				"in %d dials the most PING frames any Initial carried was %d and this dial's spec declares a ceiling of %d: MaxPING has stopped reaching the packer, so every Initial this profile sends carries a PING count the document never declared — %v",
 				tc.dials, maxPings, fb.MaxPING, pingCounts)
+			// The four equalities above bound only the ENDS of the two distributions. These bound
+			// their SUPPORT, which is what a coin flip between the two declared endpoints — both
+			// fields still read, both ends still reached — cannot satisfy.
+			requireEveryDeclaredCountWasDrawn(t, "CRYPTO", cryptoCounts, int(fb.MinCRYPTO), int(fb.MaxCRYPTO), tc.dials, "dials", uniformFloor(tc.uniformDrawFloor, tc.dials, int(fb.MinCRYPTO), int(fb.MaxCRYPTO)))
+			requireEveryDeclaredCountWasDrawn(t, "PING", pingCounts, int(fb.MinPING), int(fb.MaxPING), tc.dials, "dials", uniformFloor(tc.uniformDrawFloor, tc.dials, int(fb.MinPING), int(fb.MaxPING)))
 			if tc.exactPADDINGCeiling {
 				// The separator-rich set: an un-merged Initial reaching the ceiling is routine
 				// (measured: 916 of 4000 dials individually, and the ceiling reached in 20/20
@@ -532,7 +565,7 @@ func TestUTransportInitialFrameCountsComeFromTheSpecsBounds(t *testing.T) {
 				// inside [MinPADDING,MaxPADDING] can satisfy, which is what makes a mid-range pin and
 				// a sub-range draw go red here instead of passing as "it still varies".
 				require.Equalf(t, int(fb.MaxPADDING), maxRuns,
-					"in %d dials the most PADDING runs any Initial carried was %d and this dial's spec declares a ceiling of %d: on this bound set the separators outnumber the PADDING frames %d..%d to %d, so an un-merged Initial reaching the ceiling is routine (measured in 20 of 20 trials) — a ceiling that is never reached means the count never comes from [MinPADDING,MaxPADDING] but from something strictly inside it, and every Initial this spec sends carries a PADDING shape the document never declared — %v",
+					"in %d dials the most PADDING runs any Initial carried was %d and this dial's spec declares a ceiling of %d: on this bound set the separators outnumber the PADDING frames %d..%d to %d, so an un-merged Initial reaching the ceiling is routine (measured: reached in every trial of both separator-rich sets, see the tables above this test) — a ceiling that is never reached means the count never comes from [MinPADDING,MaxPADDING] but from something strictly inside it, and every Initial this spec sends carries a PADDING shape the document never declared — %v",
 					tc.dials, maxRuns, fb.MaxPADDING, int(fb.MinPING)+int(fb.MinCRYPTO), int(fb.MaxPING)+int(fb.MaxCRYPTO), fb.MaxPADDING, runCounts)
 			} else {
 				// Too few separators here for the ceiling to be reached reliably (4% of dials), so
@@ -545,6 +578,13 @@ func TestUTransportInitialFrameCountsComeFromTheSpecsBounds(t *testing.T) {
 			require.GreaterOrEqualf(t, atOrBelowMinPADDING, tc.minDialsAtOrBelowMinPADDING,
 				"in %d dials only %d Initial(s) carried as few as %d PADDING run(s) (at least %d expected — see the measured tables above this test) although this dial's spec declares a floor of %d: the count is pinned at MaxPADDING and MinPADDING never reaches the packer — %v",
 				tc.dials, atOrBelowMinPADDING, fb.MinPADDING, tc.minDialsAtOrBelowMinPADDING, fb.MinPADDING, runCounts)
+			// THE INTERIOR of the PADDING range. Everything above bounds its two ENDS, and a coin
+			// flip between MinPADDING and MaxPADDING reaches both, so only this sees it.
+			for v := int(fb.MinPADDING) + 1; v < int(fb.MaxPADDING) && tc.minDialsAtEachInteriorPADDING > 0; v++ {
+				require.GreaterOrEqualf(t, runCounts[v], tc.minDialsAtEachInteriorPADDING,
+					"in %d dials only %d Initial(s) carried exactly %d PADDING run(s) — a count strictly inside the declared range %d..%d — and at least %d are expected on this separator-saturated set: both declared endpoints still reach the wire, so every end-of-range assertion above passes, but the count that reaches the packer is not drawn UNIFORMLY across the range — it comes from a strict subset of it, or from it with the weight piled on the ends, which is what a coin flip between MinPADDING and MaxPADDING looks like on the wire — %v",
+					tc.dials, runCounts[v], v, fb.MinPADDING, fb.MaxPADDING, tc.minDialsAtEachInteriorPADDING, runCounts)
+			}
 		})
 	}
 }
