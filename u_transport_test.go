@@ -459,7 +459,8 @@ func uDialOneInitial(t *testing.T, spec *QUICSpec, conf *Config) []byte {
 // is SET 3 with the PING bound raised to 148..152, i.e. 162..168 separators against at most 4 PADDING
 // frames, until an un-merged Initial is the common case and the interior is observable. Measured at
 // the builder, 2000 trials of 120/240 builds, builds landing in the single interior bucket (3 runs):
-// SET 3 real 30..62 against bimodal 6..29 (overlapping), SET 4 real 57..108 against bimodal 1..18.
+// SET 3 real 30..62 against bimodal 6..29 (OVERLAPPING, so no threshold separates them), SET 4 real
+// 57..108 against bimodal 1..18; at the 2000 builds set 4 ships, 624..763 against 47..90.
 func TestUTransportInitialFrameCountsComeFromTheSpecsBounds(t *testing.T) {
 	// MinCRYPTO is >= 3 in every ranged set because quic-go's initial crypto stream hands the builder
 	// three CRYPTO chunks for this ClientHello (measured, 5/5 dials) and the builder can only SPLIT
